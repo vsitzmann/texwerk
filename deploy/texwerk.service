@@ -1,0 +1,58 @@
+[Unit]
+Description=TeXWerk collaborative LaTeX server (loopback + tailscale serve), as user texwerk
+After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=texwerk
+Group=texwerk
+WorkingDirectory=/srv/texwerk/app
+# The client bundle is built at install/update time (deploy/update.sh), so a
+# restart is fast. --access: identity from tailscale serve's headers.
+ExecStart=/opt/texwerk-node/bin/node src/server/main.ts /srv/texwerk/projects --host 127.0.0.1 --port 5810 --access vincent.sitzmann@gmail.com
+Environment=NODE_ENV=production
+Environment=HOME=/srv/texwerk
+Environment=PATH=/opt/texwerk-node/bin:/usr/bin
+# Files it creates stay writable for vsitzmann (default ACLs on projects do the rest).
+UMask=0007
+Restart=always
+RestartSec=3
+# latexmk is killed after 4 minutes by the server; this bounds everything else.
+MemoryMax=6G
+TasksMax=512
+
+# --- sandbox: can see nothing of /home, write only under /srv/texwerk ---
+NoNewPrivileges=true
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/srv/texwerk
+InaccessiblePaths=-/srv/deckwerk -/root
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @reboot @swap @debug @module @obsolete @raw-io @cpu-emulation
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

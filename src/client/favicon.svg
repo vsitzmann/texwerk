@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- DeckWerk's offset-frame mark, as a page with TeX initials. -->
+  <rect x="68" y="68" width="888" height="888" rx="144" fill="#1a1b26"/>
+  <rect x="262" y="168" width="544" height="704" fill="none" stroke="#565f89" stroke-width="24"/>
+  <rect x="218" y="212" width="544" height="704" fill="#1a1b26" stroke="#c0caf5" stroke-width="28"/>
+  <text x="490" y="650" fill="#7aa2f7" font-family="Monaspace Krypton, monospace" font-size="260" font-weight="700" text-anchor="middle">TW</text>
+</svg>

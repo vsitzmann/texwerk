@@ -1,0 +1,548 @@
+import * as Y from 'yjs';
+import { Awareness } from 'y-protocols/awareness';
+import { colorFor } from '@shared/files.ts';
+import { Provider } from '@shared/provider.ts';
+import type { BinInfo, CompileSummary, Identity, ProjectSettings, ServerEvent } from '@shared/protocol.ts';
+import { CodeEditor } from './codeEditor.ts';
+import { FileTree } from './tree.ts';
+import { HistoryView } from './historyView.ts';
+import { Viewer } from './viewer.ts';
+import { api, copyText, dialog, h, initials, menu, storedName, storeName, toast, withName } from './ui.ts';
+
+/**
+ * The project editor: file tree | code editor | PDF viewer, with live
+ * collaboration over one WebSocket. Everyone's caret and selection show in
+ * the editor; everyone's current file shows in the tree and the toolbar.
+ */
+
+interface PeerState {
+  user?: { name: string; color: string; colorLight: string; agent?: boolean };
+  file?: string | null;
+  cursor?: unknown;
+}
+
+export async function renderEditor(app: HTMLElement, project: string, access: boolean): Promise<void> {
+  document.title = `${project} — TeXWerk`;
+  const doc = new Y.Doc();
+  const texts = doc.getMap<Y.Text>('text');
+  const bins = doc.getMap<BinInfo>('bin');
+  const dirs = doc.getMap<boolean>('dirs');
+  const awareness = new Awareness(doc);
+  let me: Identity = { login: '', name: storedName() || 'Anonymous', color: colorFor(storedName()) };
+  let settings: ProjectSettings = { mainFile: '', engine: 'pdflatex', autoCompile: true };
+  let compile: CompileSummary | null = null;
+  let current: CodeEditor | null = null;
+  let currentPath: string | null = null;
+  let historyView: HistoryView | null = null;
+
+  // ------------------------------------------------------------ chrome
+  const presenceEl = h('div', { class: 'presence' });
+  const compileBtn = h('button', { class: 'primary', title: 'Compile (Ctrl+S / Ctrl+Enter)' }, '▶ Recompile');
+  const compileMore = h('button', { class: 'primary', title: 'Compile settings' }, '▾');
+  const historyBtn = h('button', { title: 'Full edit history, labelled versions' }, 'History');
+  const labelBtn = h('button', { title: 'Save a named version (a git commit)' }, 'Label version');
+  const gitBtn = h('button', { title: 'Git remote, push and pull' }, 'Git…');
+  const agentBtn = h('button', { title: 'Mirror this project to your computer for your editor or agent' }, 'Agent…');
+  const downloadBtn = h('button', { title: 'Download' }, 'Download ▾');
+  const toolbar = h('div', { class: 'toolbar' },
+    h('a', { class: 'brand', href: './', title: 'All projects' }, '‹ TEXWERK'),
+    h('span', { class: 'sep' }),
+    h('span', { class: 'title', title: project }, project),
+    h('span', { class: 'group' }, compileBtn, compileMore),
+    h('span', { class: 'spacer' }),
+    presenceEl,
+    h('span', { class: 'sep' }),
+    historyBtn, labelBtn, gitBtn, agentBtn, downloadBtn);
+
+  const statusConn = h('span', {}, h('span', { class: 'dot' }), 'connecting');
+  const statusCompile = h('span', {});
+  const statusBusy = h('span', { class: 'busy' });
+  const statusCursor = h('span', {});
+  const statusbar = h('div', { class: 'statusbar' }, statusConn, statusCompile, statusBusy, h('span', { class: 'spacer' }), statusCursor);
+
+  const setStatus = (text: string | null) => { statusBusy.textContent = text ?? ''; };
+
+  const editorHead = h('div', { class: 'pane-head' }, h('span', { class: 'label' }, 'Editor'));
+  const editorHost = h('div', { class: 'editor-host' });
+  const editorPane = h('div', { class: 'pane' }, editorHead, editorHost);
+
+  const tree = new FileTree({
+    project, texts, bins, dirs,
+    onOpen: (path) => openFile(path),
+    setStatus,
+    getMainFile: () => settings.mainFile,
+    setMainFile: (path) => void saveSettings({ mainFile: path }),
+  });
+  const viewer = new Viewer({
+    project,
+    onJumpToSource: (file, line) => openFile(file, line),
+    onCloseFile: () => tree.setViewing(null),
+    onSyncFromCursor: () => void syncToPdf(),
+  });
+
+  const leftSplit = h('div', { class: 'splitter' });
+  const rightSplit = h('div', { class: 'splitter right' });
+  const body = h('div', { class: 'body' }, tree.root, leftSplit, editorPane, rightSplit, viewer.root);
+  const shell = h('div', { class: 'shell' }, toolbar, h('div'), body, statusbar);
+  app.replaceChildren(shell);
+  restoreLayout(body);
+  bindSplitter(leftSplit, body, 'left');
+  bindSplitter(rightSplit, body, 'right');
+
+  if (!access) {
+    // A small way to change the typed name without leaving the project.
+    const nameInput = h('input', { value: storedName(), spellcheck: 'false' });
+    const rename = () => {
+      const v = nameInput.value.trim();
+      if (!v || v === storedName()) return;
+      storeName(v);
+      location.reload();
+    };
+    nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') rename(); });
+    statusbar.insertBefore(h('span', {}, 'you: ', nameInput), statusCursor);
+    nameInput.style.cssText = 'width:120px;padding:0 5px;height:18px;font-size:11px';
+  }
+
+  // ------------------------------------------------------------ connection
+  const wsUrl = new URL(withName(`/ws?project=${encodeURIComponent(project)}`), location.href);
+  wsUrl.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  let synced = false;
+  let pendingOpen: string | null = new URLSearchParams(location.search).get('file');
+  const provider = new Provider({
+    url: wsUrl.href,
+    doc,
+    awareness,
+    onStatus: (status, detail) => {
+      const dot = status === 'connected' ? 'ok' : status === 'connecting' ? 'warn' : 'bad';
+      statusConn.replaceChildren(h('span', { class: `dot ${dot}` }), status === 'connected' ? 'live' : status === 'connecting' ? 'connecting…' : `offline${detail ? ` — ${detail}` : ' — reconnecting'}`);
+    },
+    onSynced: () => {
+      if (synced) return;
+      synced = true;
+      const initial = pendingOpen && (texts.has(pendingOpen) || bins.has(pendingOpen)) ? pendingOpen
+        : settings.mainFile && texts.has(settings.mainFile) ? settings.mainFile
+          : [...texts.keys()].find((p) => p.endsWith('.tex')) ?? null;
+      pendingOpen = null;
+      if (initial) openFile(initial);
+      else showPlaceholder();
+    },
+    onEvent: (event) => onServerEvent(event),
+    // The server restarted and reloaded the project: this tab's copy belongs
+    // to the old document. Start over from the server's.
+    onReset: () => {
+      statusConn.replaceChildren(h('span', { class: 'dot warn' }), 'server restarted — reloading…');
+      setTimeout(() => location.reload(), 600);
+    },
+  });
+  window.addEventListener('beforeunload', () => provider.destroy());
+
+  function onServerEvent(event: ServerEvent): void {
+    if (event.t === 'hello') {
+      me = event.you;
+      settings = event.settings;
+      awareness.setLocalStateField('user', { name: me.name, color: me.color, colorLight: `${me.color}33` });
+      setCompile(event.compile);
+      void api<{ compile: CompileSummary; output: string; log: string }>('GET', `/api/compile?project=${encodeURIComponent(project)}`)
+        .then((r) => viewer.setCompile(r.compile, r.output, r.log));
+      tree.render();
+    } else if (event.t === 'compile') {
+      setCompile(event.compile);
+      if (event.compile.state === 'done') {
+        void api<{ compile: CompileSummary; output: string; log: string }>('GET', `/api/compile?project=${encodeURIComponent(project)}`)
+          .then((r) => viewer.setCompile(r.compile, r.output, r.log));
+      }
+    } else if (event.t === 'settings') {
+      settings = event.settings;
+      tree.render();
+    } else if (event.t === 'history' || event.t === 'git') {
+      if (historyView) scheduleHistoryRefresh();
+    } else if (event.t === 'renamed') {
+      if (currentPath === event.from) setTimeout(() => openFile(event.to), 30);
+    } else if (event.t === 'notice') {
+      toast(event.message);
+    }
+  }
+
+  // ------------------------------------------------------------ files
+  function showPlaceholder(): void {
+    current?.destroy();
+    current = null;
+    currentPath = null;
+    editorHead.replaceChildren(h('span', { class: 'label' }, 'Editor'));
+    editorHost.replaceChildren(h('div', { class: 'editor-placeholder' },
+      h('div', {}, h('div', {}, 'No file open.'), h('div', { class: 'muted' }, 'Pick a file on the left, or drop files there to upload.'))));
+    awareness.setLocalStateField('file', null);
+    awareness.setLocalStateField('cursor', null);
+    tree.select(null);
+  }
+
+  function openFile(path: string, line?: number): void {
+    if (historyView) closeHistory();
+    const ytext = texts.get(path);
+    if (!ytext) {
+      const info = bins.get(path);
+      if (!info) { toast(`${path} is not in the project`, 'bad'); return; }
+      viewer.showFile(path, info.hash);
+      tree.setViewing(path);
+      return;
+    }
+    if (currentPath !== path) {
+      current?.destroy();
+      // Our caret leaves the old file before it appears in the new one.
+      awareness.setLocalStateField('cursor', null);
+      editorHost.replaceChildren();
+      current = new CodeEditor(editorHost, {
+        path,
+        ytext,
+        awareness,
+        onCursor: (l, c) => { statusCursor.textContent = `Ln ${l}, Col ${c}`; },
+        onCompile: () => void runCompile(),
+        onSyncToPdf: () => void syncToPdf(),
+      });
+      currentPath = path;
+      awareness.setLocalStateField('file', path);
+      const isMain = path === settings.mainFile;
+      editorHead.replaceChildren(
+        h('span', { class: 'label' }, 'Editor'),
+        h('span', { class: 'path' }, path),
+        isMain ? h('span', { class: 'main-badge', style: 'color:var(--yellow);font-size:9.5px' }, 'MAIN') : '');
+      tree.select(path);
+      const url = new URL(location.href);
+      url.searchParams.set('file', path);
+      history.replaceState(null, '', url);
+    }
+    if (line) setTimeout(() => current?.goToLine(line), 0);
+    else current!.view.focus();
+  }
+
+  // An open file deleted or renamed elsewhere.
+  texts.observe((event) => {
+    if (currentPath && event.keysChanged.has(currentPath) && !texts.has(currentPath)) {
+      const gone = currentPath;
+      setTimeout(() => { if (currentPath === gone && !texts.has(gone)) showPlaceholder(); }, 60);
+    }
+  });
+  bins.observe((event) => {
+    const viewing = viewer.viewingFile;
+    if (viewing && event.keysChanged.has(viewing)) {
+      const info = bins.get(viewing);
+      if (info) viewer.showFile(viewing, info.hash);
+      else { viewer.closeFile(); tree.setViewing(null); }
+    }
+  });
+
+  // ------------------------------------------------------------ presence
+  function renderPresence(): void {
+    const people: Array<{ id: number; state: PeerState }> = [];
+    const byFile = new Map<string, string[]>();
+    for (const [id, state] of awareness.getStates() as Map<number, PeerState>) {
+      if (!state.user) continue;
+      people.push({ id, state });
+      if (id !== doc.clientID && state.file) {
+        const list = byFile.get(state.file) ?? [];
+        list.push(`${state.user.name}|${state.user.color}`);
+        byFile.set(state.file, list);
+      }
+    }
+    tree.setPresence(byFile);
+    people.sort((a, b) => (a.id === doc.clientID ? -1 : b.id === doc.clientID ? 1 : a.state.user!.name.localeCompare(b.state.user!.name)));
+    presenceEl.replaceChildren(...people.map(({ id, state }) => {
+      const u = state.user!;
+      const isMe = id === doc.clientID;
+      const agent = Boolean(u.agent) || / · agent$/.test(u.name);
+      const node = h('span', {
+        class: `person${isMe ? ' me' : ''}${agent ? ' agent' : ''}`,
+        style: `background:${u.color}`,
+        title: `${u.name}${isMe ? ' (you)' : ''}${state.file ? ` — ${state.file}` : ''}`,
+      }, agent ? '⚙' : initials(u.name));
+      if (!isMe && state.file) node.addEventListener('click', () => followPeer(state));
+      return node;
+    }));
+  }
+  awareness.on('change', renderPresence);
+
+  /** Jump to where someone is working. */
+  function followPeer(state: PeerState): void {
+    if (!state.file) return;
+    openFile(state.file);
+    const cursor = state.cursor as { head?: unknown } | null | undefined;
+    const ytext = texts.get(state.file);
+    if (cursor?.head && ytext && current) {
+      try {
+        const rel = Y.createRelativePositionFromJSON(cursor.head);
+        const abs = Y.createAbsolutePositionFromRelativePosition(rel, doc);
+        if (abs && abs.type === ytext) current.revealPosition(abs.index);
+      } catch { /* stale */ }
+    }
+  }
+
+  // ------------------------------------------------------------ compile
+  function setCompile(summary: CompileSummary): void {
+    compile = summary;
+    viewer.setCompile(summary);
+    const running = summary.state === 'running';
+    compileBtn.textContent = running ? '… Compiling' : '▶ Recompile';
+    const errors = summary.issues.filter((i) => i.level === 'error').length;
+    if (running) statusCompile.replaceChildren(h('span', { class: 'dot warn' }), `compiling${summary.by ? ` (${summary.by})` : ''}…`);
+    else if (summary.rev === 0) statusCompile.replaceChildren(h('span', { class: 'dot' }), 'not compiled');
+    else statusCompile.replaceChildren(h('span', { class: `dot ${summary.ok ? 'ok' : errors ? 'bad' : 'warn'}` }),
+      summary.ok ? `compiled ${new Date(summary.finishedAt).toLocaleTimeString()}` : `${errors} error${errors === 1 ? '' : 's'}`);
+  }
+
+  async function runCompile(): Promise<void> {
+    try {
+      await api('POST', `/api/compile?project=${encodeURIComponent(project)}`);
+    } catch (err) { toast((err as Error).message, 'bad'); }
+  }
+
+  async function saveSettings(patch: Partial<ProjectSettings>): Promise<void> {
+    try {
+      const r = await api<{ settings: ProjectSettings }>('POST', `/api/settings?project=${encodeURIComponent(project)}`, patch);
+      settings = r.settings;
+      tree.render();
+    } catch (err) { toast((err as Error).message, 'bad'); }
+  }
+
+  async function syncToPdf(): Promise<void> {
+    if (!current || !currentPath) return;
+    const line = current.currentLine();
+    const r = await api<{ page: number | null; y?: number }>('GET', `/api/synctex/view?project=${encodeURIComponent(project)}&file=${encodeURIComponent(currentPath)}&line=${line}`);
+    if (r.page) viewer.revealInPdf(r.page, r.y ?? 0);
+    else toast('No position in the PDF for this line (compile first).');
+  }
+
+  compileBtn.addEventListener('click', () => void runCompile());
+  compileMore.addEventListener('click', () => {
+    const mainSelect = h('select', {});
+    for (const p of [...texts.keys()].filter((f) => f.endsWith('.tex')).sort()) {
+      mainSelect.append(h('option', { value: p, selected: p === settings.mainFile }, p));
+    }
+    mainSelect.addEventListener('change', () => void saveSettings({ mainFile: mainSelect.value }));
+    const engine = h('select', {});
+    for (const e of ['pdflatex', 'xelatex', 'lualatex'] as const) engine.append(h('option', { value: e, selected: e === settings.engine }, e));
+    engine.addEventListener('change', () => void saveSettings({ engine: engine.value as ProjectSettings['engine'] }));
+    const auto = h('input', { type: 'checkbox', checked: settings.autoCompile });
+    auto.addEventListener('change', () => void saveSettings({ autoCompile: (auto as HTMLInputElement).checked }));
+    menu(compileMore, [
+      h('div', { class: 'menu-head' }, 'Compile'),
+      h('label', { class: 'item' }, auto, 'Auto-compile after edits'),
+      h('div', { class: 'menu-field' }, h('span', { class: 'muted' }, 'main'), mainSelect),
+      h('div', { class: 'menu-field' }, h('span', { class: 'muted' }, 'engine'), engine),
+      h('div', { class: 'menu-sep' }),
+      h('button', { onclick: () => viewer.showTab('log') }, 'Show compile log'),
+    ]);
+  });
+
+  // ------------------------------------------------------------ history
+  let historyTimer: number | undefined;
+  function scheduleHistoryRefresh(): void {
+    window.clearTimeout(historyTimer);
+    historyTimer = window.setTimeout(() => void historyView?.refresh(), 400);
+  }
+
+  function openHistory(): void {
+    if (historyView) { closeHistory(); return; }
+    historyView = new HistoryView({ project, onClose: closeHistory, onLabel: openLabelDialog });
+    editorPane.style.display = 'none';
+    rightSplit.style.display = 'none';
+    viewer.root.style.display = 'none';
+    body.append(historyView.root);
+    historyBtn.classList.add('on');
+    void historyView.refresh().catch((err) => toast((err as Error).message, 'bad'));
+  }
+
+  function closeHistory(): void {
+    historyView?.destroy();
+    historyView?.root.remove();
+    historyView = null;
+    editorPane.style.display = '';
+    rightSplit.style.display = '';
+    viewer.root.style.display = '';
+    historyBtn.classList.remove('on');
+  }
+  historyBtn.addEventListener('click', openHistory);
+
+  function openLabelDialog(): void {
+    dialog((close) => {
+      const input = h('input', { placeholder: 'e.g. Submitted to NeurIPS', spellcheck: 'false' });
+      const go = h('button', { class: 'primary' }, 'Label');
+      const submit = async () => {
+        const message = input.value.trim();
+        if (!message) { input.focus(); return; }
+        go.disabled = true;
+        try {
+          await api('POST', `/api/label?project=${encodeURIComponent(project)}`, { message });
+          close();
+          toast(`Labelled "${message}"`, 'ok');
+          if (historyView) scheduleHistoryRefresh();
+        } catch (err) { toast((err as Error).message, 'bad'); go.disabled = false; }
+      };
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') void submit(); });
+      go.addEventListener('click', () => void submit());
+      return [
+        h('h2', {}, 'Label this version'),
+        h('p', { class: 'muted' }, 'Saves the whole project as a named version: a git commit authored by you. Labels show in the history, can be reverted to, and are what Git… pushes.'),
+        input,
+        h('div', { class: 'actions' }, h('button', { onclick: close }, 'Cancel'), go),
+      ];
+    });
+  }
+  labelBtn.addEventListener('click', openLabelDialog);
+
+  // ------------------------------------------------------------ git
+  gitBtn.addEventListener('click', () => {
+    dialog((close) => {
+      const info = h('div', { class: 'kv' }, h('span', {}, 'loading…'));
+      const remote = h('input', { placeholder: 'git@github.com:you/paper.git', spellcheck: 'false' });
+      const out = h('pre', { class: 'out', hidden: true });
+      const keyBox = h('div', {});
+      const run = async (label: string, work: () => Promise<{ output?: string }>) => {
+        out.hidden = false;
+        out.classList.remove('bad');
+        out.textContent = `${label}…`;
+        try {
+          const r = await work();
+          out.textContent = r.output || `${label}: done.`;
+        } catch (err) {
+          out.classList.add('bad');
+          out.textContent = (err as Error).message;
+        }
+        await load();
+      };
+      const load = async () => {
+        const { status } = await api<{ status: { branch: string; remote: string; ahead: number | null; behind: number | null; dirty: boolean } }>('GET', `/api/git?project=${encodeURIComponent(project)}`);
+        if (document.activeElement !== remote) remote.value = status.remote;
+        info.replaceChildren(
+          h('span', {}, 'branch'), h('b', {}, status.branch),
+          h('span', {}, 'since label'), h('b', {}, status.dirty ? 'unlabelled changes' : 'nothing new'),
+          h('span', {}, 'remote'), h('b', {}, status.ahead === null ? (status.remote ? 'not pushed yet' : 'none')
+            : `${status.ahead} to push, ${status.behind} to pull`));
+      };
+      const loadKey = async (generate: boolean) => {
+        const r = await api<{ publicKey: string | null }>(generate ? 'POST' : 'GET', '/api/ssh-key');
+        if (r.publicKey) {
+          const copy = h('button', { onclick: () => void copyText(r.publicKey!).then(() => toast('Copied', 'ok', 1200)) }, 'Copy');
+          keyBox.replaceChildren(
+            h('p', { class: 'muted' }, 'To push to a private repository over SSH, add this server key as a deploy key with write access (GitHub: repo → Settings → Deploy keys).'),
+            h('pre', { class: 'cmd' }, r.publicKey), h('div', { class: 'actions' }, copy));
+        } else {
+          keyBox.replaceChildren(h('p', { class: 'muted' }, 'The server has no SSH key yet. Generate one to push to private repositories over SSH.'),
+            h('div', { class: 'actions' }, h('button', { onclick: () => void loadKey(true) }, 'Generate SSH key')));
+        }
+      };
+      void load();
+      void loadKey(false);
+      return [
+        h('h2', {}, 'Git'),
+        h('p', { class: 'muted' }, 'This project is a git repository on the server. Each label is a commit; push sends labels to the remote, pull merges the remote in (unlabelled changes are committed first).'),
+        info,
+        h('h3', {}, 'Remote (origin)'),
+        h('div', { class: 'row' }, remote,
+          h('button', { onclick: () => void run('Saving remote', () => api('POST', `/api/git/remote?project=${encodeURIComponent(project)}`, { url: remote.value.trim() })) }, 'Save')),
+        h('div', { class: 'row' },
+          h('button', { onclick: openLabelDialog }, 'Label version…'),
+          h('span', { class: 'spacer' }),
+          h('button', { onclick: () => void run('Pulling', () => api('POST', `/api/git/pull?project=${encodeURIComponent(project)}`)) }, 'Pull'),
+          h('button', { class: 'primary', onclick: () => void run('Pushing', () => api('POST', `/api/git/push?project=${encodeURIComponent(project)}`)) }, 'Push')),
+        out,
+        h('h3', {}, 'Server SSH key'),
+        keyBox,
+        h('div', { class: 'actions' }, h('button', { onclick: close }, 'Close')),
+      ];
+    }, { wide: true });
+  });
+
+  // ------------------------------------------------------------ agent
+  agentBtn.addEventListener('click', () => {
+    const origin = location.origin;
+    const session = `${origin}/?project=${encodeURIComponent(project)}${access ? '' : `&name=${encodeURIComponent(me.name)}`}`;
+    const folder = project.replace(/[^\w.-]+/g, '-');
+    const command = `curl -fsSL ${origin}/texwerk-connect.mjs -o texwerk-connect.mjs && node texwerk-connect.mjs '${session}' ${folder}`;
+    dialog((close) => [
+      h('h2', {}, 'Bring your own agent — or editor'),
+      h('p', {}, 'Run this on your computer (needs Node 22+). It mirrors the project into ', h('code', {}, `./${folder}`), ' and keeps it in sync both ways, live, for as long as it runs.'),
+      h('pre', { class: 'cmd' }, command),
+      h('div', { class: 'actions' }, h('button', { class: 'primary', onclick: () => void copyText(command).then(() => toast('Command copied', 'ok', 1500)) }, 'Copy command')),
+      h('h3', {}, 'Then'),
+      h('ul', {},
+        h('li', {}, 'Start Claude Code, Codex or any agent in that folder. Every save it makes reaches everyone here within a fraction of a second, merged character by character with what people are typing, and shows in History as ', h('b', {}, `${me.name} · agent`), '.'),
+        h('li', {}, 'Or open the folder in your own editor (VS Code, Vim, Emacs…). Turn on auto-reload of changed files so collaborators\' edits appear in your buffer.'),
+        h('li', {}, 'The agent can compile and read the result: ', h('code', {}, 'node .texwerk/tw compile'), ' prints errors; the PDF lands in ', h('code', {}, '.texwerk/output.pdf'), '. Instructions are in ', h('code', {}, '.texwerk/AGENT.md'), '.')),
+      h('p', { class: 'muted' }, 'Nothing runs on the server on your behalf. Ctrl+C stops the mirror; the folder stays.'),
+      h('div', { class: 'actions' }, h('button', { onclick: close }, 'Close')),
+    ], { wide: true });
+  });
+
+  // ------------------------------------------------------------ download
+  downloadBtn.addEventListener('click', () => {
+    const go = (url: string) => { const a = h('a', { href: withName(url) }); document.body.append(a); a.click(); a.remove(); };
+    menu(downloadBtn, [
+      h('button', { onclick: () => go(`/api/zip?project=${encodeURIComponent(project)}`) }, 'Project as .zip'),
+      h('button', { disabled: !compile?.hasPdf, onclick: () => go(`/pdf/${encodeURIComponent(project)}/output.pdf?download=1`) }, 'Compiled PDF'),
+    ]);
+  });
+
+  // ------------------------------------------------------------ window-level drop
+  let dragDepth = 0;
+  window.addEventListener('dragenter', (e) => {
+    if (!e.dataTransfer?.types.includes('Files')) return;
+    dragDepth++;
+    if (!document.querySelector('.drop-overlay')) document.body.append(h('div', { class: 'drop-overlay' }, 'Drop to upload into the project root — or onto a folder in the file tree'));
+  });
+  window.addEventListener('dragleave', () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) document.querySelector('.drop-overlay')?.remove(); });
+  window.addEventListener('dragover', (e) => { if (e.dataTransfer?.types.includes('Files')) e.preventDefault(); });
+  window.addEventListener('drop', (e) => {
+    dragDepth = 0;
+    document.querySelector('.drop-overlay')?.remove();
+    if (!e.dataTransfer?.types.includes('Files')) return;
+    e.preventDefault();
+    void tree.dropFiles(e.dataTransfer, '');
+  });
+
+  // ------------------------------------------------------------ keys
+  window.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'Enter')) { e.preventDefault(); void runCompile(); }
+  });
+
+}
+
+// ------------------------------------------------------------ layout
+
+function restoreLayout(body: HTMLElement): void {
+  try {
+    const saved = JSON.parse(localStorage.getItem('texwerk-layout') ?? '{}') as { tree?: number; viewer?: number };
+    if (saved.tree) body.style.setProperty('--tree-w', `${saved.tree}px`);
+    if (saved.viewer) body.style.setProperty('--viewer-w', `${saved.viewer}px`);
+  } catch { /* defaults */ }
+}
+
+function bindSplitter(handle: HTMLElement, body: HTMLElement, side: 'left' | 'right'): void {
+  handle.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    handle.classList.add('dragging');
+    const rect = body.getBoundingClientRect();
+    const move = (ev: PointerEvent) => {
+      if (side === 'left') {
+        const w = Math.max(140, Math.min(500, ev.clientX - rect.left));
+        body.style.setProperty('--tree-w', `${w}px`);
+      } else {
+        const w = Math.max(240, Math.min(rect.width - 400, rect.right - ev.clientX));
+        body.style.setProperty('--viewer-w', `${w}px`);
+      }
+    };
+    const up = () => {
+      handle.classList.remove('dragging');
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', up);
+      try {
+        localStorage.setItem('texwerk-layout', JSON.stringify({
+          tree: parseInt(body.style.getPropertyValue('--tree-w')) || undefined,
+          viewer: parseInt(body.style.getPropertyValue('--viewer-w')) || undefined,
+        }));
+      } catch { /* ignore */ }
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', up);
+  });
+}
