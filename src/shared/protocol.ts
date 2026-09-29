@@ -93,5 +93,19 @@ export interface GitLabel {
   historyId: number | null;
 }
 
+/**
+ * Who a Yjs client id belongs to (doc map `authors`, keyed by the id as a
+ * string). Every character in a Y.Text records the client that inserted it,
+ * so this is all it takes to say who wrote each word.
+ */
+export interface AuthorInfo {
+  name: string;
+  login: string;
+  color: string;
+  agent?: boolean;
+  /** When this client was first seen (ms). */
+  first: number;
+}
+
 /** HTTP header the mirror bridge sends so the server can tell it apart. */
 export const BRIDGE_HEADER = 'x-texwerk-bridge';

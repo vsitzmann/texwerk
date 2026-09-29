@@ -8,6 +8,8 @@ import { FileTree } from './tree.ts';
 import { HistoryView } from './historyView.ts';
 import { Viewer, type PdfPin } from './viewer.ts';
 import { Comments } from './comments.ts';
+import { authorRuns } from '@shared/provenance.ts';
+import type { AuthorInfo } from '@shared/protocol.ts';
 import type { CommentThread } from '@shared/comments.ts';
 import { api, copyText, dialog, h, initials, menu, storedName, storeName, toast, withName } from './ui.ts';
 import { showPicker, showShareDialog, type Me } from './picker.ts';
@@ -84,6 +86,47 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
   const setStatus = (text: string | null) => { statusBusy.textContent = text ?? ''; };
 
   const editorHead = h('div', { class: 'pane-head' }, h('span', { class: 'label' }, 'Editor'));
+  // Authors: colour the text by who last wrote each part of it.
+  const authorsMap = doc.getMap<AuthorInfo>('authors');
+  let showAuthors = false;
+  try { showAuthors = localStorage.getItem('texwerk-show-authors') === '1'; } catch { /* default off */ }
+  const authorsBtn = h('button', { class: `ghost icon authors-toggle${showAuthors ? ' on' : ''}`, title: 'Colour the text by who last wrote it' }, 'Authors');
+  const authorsLegend = h('span', { class: 'authors-legend' });
+  authorsBtn.addEventListener('click', () => {
+    showAuthors = !showAuthors;
+    authorsBtn.classList.toggle('on', showAuthors);
+    try { localStorage.setItem('texwerk-show-authors', showAuthors ? '1' : '0'); } catch { /* ignore */ }
+    updateAuthors();
+  });
+  let authorsTimer: number | undefined;
+  function scheduleAuthors(): void {
+    if (!showAuthors) return;
+    window.clearTimeout(authorsTimer);
+    authorsTimer = window.setTimeout(updateAuthors, 250);
+  }
+  function updateAuthors(): void {
+    if (!current || !currentPath) return;
+    const ytext = texts.get(currentPath);
+    if (!showAuthors || !ytext) {
+      current.setAuthors(null);
+      authorsLegend.replaceChildren();
+      return;
+    }
+    const runs = authorRuns(ytext, authorsMap);
+    const total = runs.reduce((n, r) => n + (r.to - r.from), 0) || 1;
+    const share = new Map<string, { chars: number; color: string }>();
+    for (const r of runs) {
+      const s = share.get(r.author) ?? { chars: 0, color: r.color };
+      s.chars += r.to - r.from;
+      share.set(r.author, s);
+    }
+    current.setAuthors(runs.map((r) => ({ from: r.from, to: r.to, color: r.color, label: `Last written by ${r.author}` })));
+    authorsLegend.replaceChildren(...[...share.entries()].sort((a, b) => b[1].chars - a[1].chars).map(([name, s]) =>
+      h('span', { class: 'authors-chip', style: `--c:${s.color}`, title: `${name}: ${(s.chars / total * 100).toFixed(1)}% of this file` },
+        `${name} ${Math.round(s.chars / total * 100)}%`)));
+  }
+  doc.getMap('text').observeDeep(() => scheduleAuthors());
+  authorsMap.observe(() => scheduleAuthors());
   const editorHost = h('div', { class: 'editor-host' });
   const editorPane = h('div', { class: 'pane' }, editorHead, editorHost);
 
@@ -309,7 +352,11 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
       editorHead.replaceChildren(
         h('span', { class: 'label' }, 'Editor'),
         h('span', { class: 'path' }, path),
-        isMain ? h('span', { class: 'main-badge', style: 'color:var(--yellow);font-size:9.5px' }, 'MAIN') : '');
+        isMain ? h('span', { class: 'main-badge', style: 'color:var(--yellow);font-size:9.5px' }, 'MAIN') : '',
+        h('span', { class: 'spacer' }),
+        authorsLegend,
+        authorsBtn);
+      updateAuthors();
       tree.select(path);
       const url = new URL(location.href);
       url.searchParams.set('file', path);

@@ -43,6 +43,12 @@ No accounts. On a tailnet with `--access`, your tailnet login is your identity.
   + comments** or **Compiled PDF with comments** (real PDF sticky notes).
   Agents see them in `.texwerk/comments.md` and use `node .texwerk/tw
   comments | comment | reply | resolve`.
+- **Who wrote what.** The **Authors** switch above the editor tints the text by
+  who last wrote each part of it — people, "… · agent" for mirrored agents,
+  and whoever uploaded, restored or pulled for server-side changes — with a
+  legend of everyone's share of the file. It comes straight from the
+  collaborative document (every character remembers the client that typed
+  it), survives server restarts and renames, and costs nothing extra.
 - **Labels are git commits.** Every project folder is a git repository.
   **Label version** commits the whole project, authored by you, and the label
   appears in the history, where the project can be reverted to it. **Git…**
@@ -99,9 +105,11 @@ sudo ./deploy/install.sh     # once: TeX Live, user, folders, node, build, servi
 sudo ./deploy/update.sh      # deploy the committed HEAD of this checkout and restart
 ```
 
-A restart persists every open project first; open browser tabs and mirror
-bridges notice the reloaded documents and re-sync on their own (a tab reloads;
-a bridge keeps any local edits it had not sent yet).
+A restart persists every open project first, including the collaborative
+document itself (`.texwerk/ydoc.bin`), which is reloaded on start — so open
+tabs and mirror bridges simply reconnect and carry on. Only if that saved
+document is missing is it rebuilt from the files; then tabs reload and bridges
+re-sync, keeping local edits they had not sent yet.
 
 ## How it works
 

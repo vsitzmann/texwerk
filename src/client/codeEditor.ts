@@ -183,6 +183,38 @@ function commentTooltip(onComment: () => void) {
   });
 }
 
+// ------------------------------------------------------------ provenance
+
+/** A run of text and who last wrote it, as the Authors view draws it. */
+export interface AuthorMark {
+  from: number;
+  to: number;
+  color: string;
+  label: string;
+}
+
+const setAuthorsEffect = StateEffect.define<AuthorMark[] | null>();
+
+const authorsField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(deco, tr) {
+    for (const e of tr.effects) {
+      if (e.is(setAuthorsEffect)) {
+        if (!e.value) return Decoration.none;
+        const len = tr.state.doc.length;
+        return Decoration.set(e.value
+          .filter((m) => m.to > m.from && m.from < len)
+          .map((m) => Decoration.mark({
+            class: 'cm-author',
+            attributes: { title: m.label, style: `--c:${m.color}` },
+          }).range(m.from, Math.min(m.to, len))), true);
+      }
+    }
+    return tr.docChanged ? deco.map(tr.changes) : deco;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
+
 export interface CodeEditorOptions {
   path: string;
   ytext: Y.Text;
@@ -232,6 +264,7 @@ export class CodeEditor {
         // so viewers can still select text to comment on.
         EditorState.readOnly.of(Boolean(opts.readOnly)),
         flashField,
+        authorsField,
         commentsField,
         commentTooltip(() => this.startComment()),
         EditorView.domEventHandlers({
@@ -287,6 +320,11 @@ export class CodeEditor {
     const coords = this.view.coordsAtPos(sel.to) ?? this.view.coordsAtPos(sel.from);
     const rect = coords ? new DOMRect(coords.left, coords.top, 1, coords.bottom - coords.top) : this.view.dom.getBoundingClientRect();
     this.onComment(sel.from, sel.to, rect);
+  }
+
+  /** Colour the text by author; null turns the view off. */
+  setAuthors(marks: AuthorMark[] | null): void {
+    this.view.dispatch({ effects: setAuthorsEffect.of(marks) });
   }
 
   setComments(marks: CommentMark[]): void {

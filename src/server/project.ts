@@ -9,13 +9,14 @@ import * as syncProtocol from 'y-protocols/sync';
 import * as awarenessProtocol from 'y-protocols/awareness';
 import * as encoding from 'lib0/encoding';
 import * as decoding from 'lib0/decoding';
-import { isTextFile, RESERVED_DIRS } from '../shared/files.ts';
+import { colorFor, isTextFile, RESERVED_DIRS } from '../shared/files.ts';
 import {
   MSG_AWARENESS, MSG_SYNC,
-  type BinInfo, type CompileSummary, type Identity, type ProjectSettings, type ServerEvent,
+  type AuthorInfo, type BinInfo, type CompileSummary, type Identity, type ProjectSettings, type ServerEvent,
 } from '../shared/protocol.ts';
 import { setYText } from '../shared/textDiff.ts';
 import { allThreads, type CommentMessage, type CommentThread, type ThreadMap } from '../shared/comments.ts';
+import { authorRuns } from '../shared/provenance.ts';
 import { BUILD_DIR, runLatexmk } from './compile.ts';
 import { ensureRepo } from './git.ts';
 import { hashBytes, History } from './history.ts';
@@ -63,11 +64,20 @@ export class Project {
   readonly name: string;
   readonly dir: string;
   readonly doc = new Y.Doc();
-  /** Changes whenever the document is loaded afresh (see ServerEvent hello). */
-  readonly epoch = randomUUID();
+  /**
+   * Identifies this document's lineage (see ServerEvent hello). Kept across
+   * restarts when the saved document is reloaded — clients' state then shares
+   * its history and merges safely — and new whenever it had to be rebuilt
+   * from the files.
+   */
+  epoch: string = randomUUID();
   readonly texts: Y.Map<Y.Text>;
   readonly bins: Y.Map<BinInfo>;
   readonly comments: Y.Map<ThreadMap>;
+  readonly authors: Y.Map<AuthorInfo>;
+  /** The server's own client id, and the ids it writes under for each author (see transactAs). */
+  private readonly homeClient: number;
+  private readonly clientOf = new Map<string, number>();
   readonly dirs: Y.Map<boolean>;
   readonly awareness: awarenessProtocol.Awareness;
   readonly history: History;
@@ -99,6 +109,8 @@ export class Project {
     this.texts = this.doc.getMap('text');
     this.bins = this.doc.getMap('bin');
     this.comments = this.doc.getMap('comments');
+    this.authors = this.doc.getMap('authors');
+    this.homeClient = this.doc.clientID;
     this.dirs = this.doc.getMap('dirs');
     this.awareness = new awarenessProtocol.Awareness(this.doc);
     this.awareness.setLocalState(null);
@@ -114,17 +126,37 @@ export class Project {
     await this.history.load();
     await this.loadSettings();
     const origin: ServerOrigin = { author: 'disk' };
+    // The saved document keeps who wrote what; the files on disk are still
+    // the truth for what the text is (anything changed outside TeXWerk while
+    // the server was down is folded in as an edit "on disk").
+    try {
+      Y.applyUpdate(this.doc, await readFile(this.docFile()), origin);
+      const saved = (await readFile(join(this.dir, '.texwerk', 'epoch'), 'utf8')).trim();
+      if (saved) this.epoch = saved;
+    } catch { /* first open, or unreadable: start from the files */ }
+    await writeFile(join(this.dir, '.texwerk', 'epoch'), `${this.epoch}\n`);
+    this.reindexTexts();
     const files = await this.scan();
-    this.doc.transact(() => {
-      for (const d of files.dirs) this.dirs.set(d, true);
+    const onDisk = new Set(files.files.map((f) => f.path));
+    const dirsOnDisk = new Set(files.dirs);
+    this.transactAs('(on disk)', () => {
+      for (const d of files.dirs) if (!this.dirs.has(d)) this.dirs.set(d, true);
+      for (const d of [...this.dirs.keys()]) if (!dirsOnDisk.has(d)) this.dirs.delete(d);
       for (const f of files.files) {
         if (f.text !== null) {
-          const ytext = new Y.Text(f.text);
-          this.texts.set(f.path, ytext);
+          this.bins.delete(f.path);
+          const existing = this.texts.get(f.path);
+          if (!existing) this.texts.set(f.path, new Y.Text(f.text));
+          else if (existing.toString() !== f.text) setYText(existing, f.text);
         } else {
-          this.bins.set(f.path, { hash: f.hash, size: f.size });
+          this.texts.delete(f.path);
+          const known = this.bins.get(f.path);
+          if (!known || known.hash !== f.hash) this.bins.set(f.path, { hash: f.hash, size: f.size });
         }
         this.diskHash.set(f.path, f.hash);
+      }
+      for (const p of [...this.texts.keys(), ...this.bins.keys()]) {
+        if (!onDisk.has(p)) { this.texts.delete(p); this.bins.delete(p); }
       }
     }, origin);
     this.reindexTexts();
@@ -140,7 +172,11 @@ export class Project {
     await this.restoreLastCompile();
     await this.loadComments();
 
-    this.doc.on('update', (update: Uint8Array, origin: unknown) => this.broadcastUpdate(update, origin));
+    this.doc.on('update', (update: Uint8Array, origin: unknown) => {
+      this.broadcastUpdate(update, origin);
+      this.noteAuthors(update, origin);
+      this.scheduleDocSave();
+    });
     this.doc.on('afterTransaction', (tr: Y.Transaction) => this.afterTransaction(tr));
     this.awareness.on('update', (changes: { added: number[]; updated: number[]; removed: number[] }, origin: unknown) =>
       this.onAwareness(changes, origin));
@@ -435,7 +471,7 @@ export class Project {
     this.ensureParentDirs(rel, origin);
     if (isTextFile(rel, data)) {
       const text = data.toString('utf8');
-      this.doc.transact(() => {
+      this.transactAs(author === 'disk' ? '(edited on disk)' : author, () => {
         this.bins.delete(rel);
         const existing = this.texts.get(rel);
         if (existing) setYText(existing, text);
@@ -485,7 +521,7 @@ export class Project {
     const hash = hashBytes(data);
     if (isTextFile(path, data)) {
       const text = data.toString('utf8');
-      this.doc.transact(() => {
+      this.transactAs(author, () => {
         this.bins.delete(path);
         const existing = this.texts.get(path);
         if (existing) setYText(existing, text);
@@ -535,12 +571,23 @@ export class Project {
     await mkdir(dirname(join(this.dir, to)), { recursive: true });
     await rename(join(this.dir, from), join(this.dir, to));
     this.ensureParentDirs(to, origin);
+    // A moved file is a new Y.Text; copy it run by run so every word keeps its author.
+    const runs = new Map(movedTexts.map(([p, ytext]) => [p, authorRuns(ytext, this.authors)]));
     this.doc.transact(() => {
-      for (const [p, ytext] of movedTexts) {
-        const content = ytext.toString();
+      for (const [p] of movedTexts) {
         this.texts.delete(p);
-        this.texts.set(mapPath(p), new Y.Text(content));
+        this.texts.set(mapPath(p), new Y.Text());
       }
+    }, origin);
+    for (const [p] of movedTexts) {
+      let at = 0;
+      for (const run of runs.get(p)!) {
+        const target = this.texts.get(mapPath(p))!;
+        this.transactAs(run.author, () => target.insert(at, run.text), origin);
+        at += run.text.length;
+      }
+    }
+    this.doc.transact(() => {
       for (const [p, info] of movedBins) { this.bins.delete(p); this.bins.set(mapPath(p), info); }
       for (const d of movedDirs) { this.dirs.delete(d); this.dirs.set(mapPath(d), true); }
     }, origin);
@@ -679,6 +726,71 @@ export class Project {
     this.unloadTimer = setTimeout(() => {
       if (this.conns.size === 0 && !this.compiling) void this.close().then(() => this.onUnload?.());
     }, UNLOAD_AFTER_MS);
+  }
+
+  // ------------------------------------------------------------- provenance
+
+  private docFile(): string {
+    return join(this.dir, '.texwerk', 'ydoc.bin');
+  }
+
+  private docSaveTimer: NodeJS.Timeout | null = null;
+
+  private scheduleDocSave(): void {
+    if (this.docSaveTimer) return;
+    this.docSaveTimer = setTimeout(() => { this.docSaveTimer = null; this.saveDoc(); }, 2000);
+  }
+
+  saveDoc(): void {
+    if (this.docSaveTimer) { clearTimeout(this.docSaveTimer); this.docSaveTimer = null; }
+    mkdirSync(join(this.dir, '.texwerk'), { recursive: true });
+    const tmp = `${this.docFile()}.${process.pid}.tmp`;
+    writeFileSync(tmp, Y.encodeStateAsUpdate(this.doc));
+    renameSync(tmp, this.docFile());
+  }
+
+  /** Record who each new Yjs client in an update belongs to. */
+  private noteAuthors(update: Uint8Array, origin: unknown): void {
+    const conn = origin as Conn | null;
+    if (!conn || !this.conns.has(conn)) return;
+    let clients: number[];
+    try {
+      clients = [...new Set(Y.decodeUpdate(update).structs.map((s) => s.id.client))];
+    } catch {
+      return;
+    }
+    const fresh = clients.filter((c) => !this.authors.has(String(c)));
+    if (!fresh.length) return;
+    const name = conn.bridge ? `${conn.identity.name} · agent` : conn.identity.name;
+    queueMicrotask(() => this.doc.transact(() => {
+      for (const c of fresh) {
+        this.authors.set(String(c), {
+          name, login: conn.identity.login, color: colorFor(conn.bridge ? `${conn.identity.login}:agent` : conn.identity.login),
+          agent: conn.bridge || undefined, first: Date.now(),
+        });
+      }
+    }, { author: 'authors' }));
+  }
+
+  /**
+   * Run a server-side text change so its characters are attributed to
+   * `author` (an upload, a restore, a pull, an edit on disk): each author
+   * gets a client id of its own for this session, registered in `authors`.
+   */
+  private transactAs(author: string, fn: () => void, origin: unknown = { author }): void {
+    let client = this.clientOf.get(author);
+    if (client === undefined) {
+      do { client = Math.floor(Math.random() * 0xffffffff); } while (this.authors.has(String(client)) || client === this.homeClient);
+      this.clientOf.set(author, client);
+      const login = author.startsWith('(') ? '' : author;
+      this.doc.transact(() => this.authors.set(String(client!), { name: author, login, color: author.startsWith('(') ? '#565f89' : colorFor(author), first: Date.now() }), { author: 'authors' });
+    }
+    this.doc.clientID = client;
+    try {
+      this.doc.transact(fn, origin);
+    } finally {
+      this.doc.clientID = this.homeClient;
+    }
   }
 
   // ---------------------------------------------------------------- comments
@@ -831,6 +943,7 @@ export class Project {
     if (this.unloadTimer) clearTimeout(this.unloadTimer);
     await this.persistAll();
     this.saveComments();
+    this.saveDoc();
     await this.history.flush(true);
     for (const c of this.conns) c.ws.close(1001, 'server shutting down');
     this.doc.destroy();
