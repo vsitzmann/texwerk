@@ -16,7 +16,7 @@ ME=${SUDO_USER:-vsitzmann}
 # The Node that DeckWerk's service also uses (mise-managed; sudo's PATH does
 # not see mise). Override with NODE_SRC=/path/to/node-install.
 MISE_NODE=/home/$ME/.local/share/mise/installs/node
-NODE_SRC=${NODE_SRC:-$(ls -d "$MISE_NODE"/*/ 2>/dev/null | sort -V | tail -1)}
+NODE_SRC=${NODE_SRC:-$(ls -d "$MISE_NODE"/*/ 2>/dev/null | grep -E "/[0-9]+\.[0-9]+\.[0-9]+/$" | sort -V | tail -1)}
 NODE_SRC=${NODE_SRC%/}
 [[ -x $NODE_SRC/bin/node && -e $NODE_SRC/bin/npm ]] || { echo "no Node install with npm found (tried '$NODE_SRC'); set NODE_SRC=..."; exit 1; }
 PORT=5810
