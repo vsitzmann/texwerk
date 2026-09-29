@@ -729,3 +729,7 @@ button.busy { opacity: .75; cursor: progress; }
   .picker-row .picker-cell:nth-child(n+4) { display: none; }
   .picker-actions { width: auto; }
 }
+
+.deploy-key { display: flex; flex-direction: column; gap: 8px; }
+.deploy-key details summary { color: var(--dim); font-size: 11px; cursor: pointer; }
+.deploy-key .agent-text { max-height: 260px; overflow: auto; color: var(--text); user-select: text; }

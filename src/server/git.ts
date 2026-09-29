@@ -29,10 +29,56 @@ export interface GitResult {
   output: string;
 }
 
+/**
+ * Every project has its own SSH deploy key, created on request and kept in
+ * `.texwerk/` (never committed, never mirrored). GitHub accepts a deploy key
+ * on one repository only, which is exactly the scope we want: a project's key
+ * can reach its own repository and nothing else. Remote operations in the
+ * project use that key and no other.
+ */
+export function deployKeyPath(dir: string): string {
+  return join(dir, '.texwerk', 'deploy_key');
+}
+
+function envFor(cwd: string): NodeJS.ProcessEnv {
+  const key = deployKeyPath(cwd);
+  if (!existsSync(key)) return GIT_ENV;
+  return {
+    ...GIT_ENV,
+    GIT_SSH_COMMAND: `ssh -i '${key.replace(/'/g, `'\\''`)}' -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new`,
+  };
+}
+
+export async function ensureDeployKey(dir: string, comment: string): Promise<string> {
+  const key = deployKeyPath(dir);
+  if (!existsSync(key)) {
+    await mkdir(join(dir, '.texwerk'), { recursive: true });
+    await new Promise<void>((done, fail) => execFile('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', comment, '-f', key],
+      (err) => (err ? fail(err) : done())));
+  }
+  return (await readFile(`${key}.pub`, 'utf8')).trim();
+}
+
+export async function readDeployKey(dir: string): Promise<string | null> {
+  try { return (await readFile(`${deployKeyPath(dir)}.pub`, 'utf8')).trim(); } catch { return null; }
+}
+
+/** Git's answer when a remote refuses us, turned into what to do about it. */
+function explain(output: string, cwd: string): string {
+  if (/Permission denied \(publickey\)|Repository not found|Could not read from remote repository/i.test(output)) {
+    const hint = existsSync(deployKeyPath(cwd))
+      ? 'The remote refused this project\'s deploy key. Add the key shown under "Deploy key" to the repository with write access (or check the remote address).'
+      : 'The remote needs a key. Create this project\'s deploy key under "Deploy key" and add it to the repository with write access.';
+    return `${hint}\n\n${output}`;
+  }
+  return output;
+}
+
 export function git(cwd: string, args: string[], timeoutMs = 60_000): Promise<GitResult> {
   return new Promise((resolve) => {
-    execFile('git', args, { cwd, env: GIT_ENV, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
-      resolve({ ok: !err, output: `${stdout}${stderr}`.trim() || (err ? String(err.message) : '') });
+    execFile('git', args, { cwd, env: envFor(cwd), timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+      const output = `${stdout}${stderr}`.trim() || (err ? String(err.message) : '');
+      resolve({ ok: !err, output: err ? explain(output, cwd) : output });
     });
   });
 }
@@ -134,10 +180,32 @@ export async function push(dir: string): Promise<GitResult> {
   return git(dir, ['push', '-u', 'origin', branch], 120_000);
 }
 
+/** The remote's default branch (what `git clone` would check out). */
+async function remoteDefaultBranch(dir: string): Promise<string | null> {
+  const r = await git(dir, ['ls-remote', '--symref', 'origin', 'HEAD'], 60_000);
+  return /ref: refs\/heads\/(\S+)\s+HEAD/.exec(r.output)?.[1] ?? null;
+}
+
+/** Can this project's key reach the remote? For the Git dialog's "Test". */
+export async function testRemote(dir: string): Promise<GitResult> {
+  const r = await git(dir, ['ls-remote', '--heads', 'origin'], 60_000);
+  if (r.ok) return { ok: true, output: 'Connected: the server can reach the repository with this project\'s key.' };
+  return r;
+}
+
 export async function pull(dir: string, name: string, email: string): Promise<GitResult> {
-  const branch = await currentBranch(dir);
+  let branch = await currentBranch(dir);
   const fetch = await git(dir, ['fetch', 'origin'], 120_000);
   if (!fetch.ok) return fetch;
+  // A project with no labels yet adopts the remote wholesale, like a clone:
+  // there is no history of ours to merge.
+  if (!(await git(dir, ['rev-parse', '--verify', '-q', 'HEAD'])).ok) {
+    branch = (await remoteDefaultBranch(dir)) ?? branch;
+    if (!(await git(dir, ['rev-parse', '--verify', '-q', `origin/${branch}`])).ok) {
+      return { ok: true, output: 'The remote is empty: nothing to pull. Label a version and push to fill it.' };
+    }
+    return git(dir, ['checkout', '-f', '-B', branch, '--track', `origin/${branch}`]);
+  }
   // Unlabelled work in progress is committed first so a pull never discards it.
   if ((await git(dir, ['status', '--porcelain'])).output) {
     const saved = await commitAll(dir, 'Changes before pull', name, email, -1);

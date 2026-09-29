@@ -161,3 +161,41 @@ test('labels are git commits that point back into the history', async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('deploy key: one per project, used for its remote, and a first pull adopts the remote', async () => {
+  const { ensureDeployKey, readDeployKey, pull, push, git: run } = await import('../src/server/git.ts');
+  const base = await mkdtemp(join(tmpdir(), 'texwerk-deploy-'));
+  try {
+    // A "remote" with one commit on main.
+    const remote = join(base, 'remote.git');
+    const seed = join(base, 'seed');
+    await run(base, ['init', '-q', '--bare', '-b', 'main', remote]);
+    await run(base, ['init', '-q', '-b', 'main', seed]);
+    await writeFile(join(seed, 'paper.tex'), 'from the remote');
+    await run(seed, ['add', '-A']);
+    await run(seed, ['-c', 'user.name=x', '-c', 'user.email=x@y', 'commit', '-qm', 'seed']);
+    await run(seed, ['push', '-q', remote, 'main']);
+    // A fresh project with nothing labelled yet, a stray template file, and the remote.
+    const project = join(base, 'project');
+    await import('node:fs/promises').then((fs) => fs.mkdir(project));
+    await ensureRepo(project);
+    await writeFile(join(project, 'paper.tex'), 'template that should be replaced');
+    await run(project, ['remote', 'add', 'origin', remote]);
+    assert.equal(await readDeployKey(project), null);
+    const key = await ensureDeployKey(project, 'texwerk:test');
+    assert.match(key, /^ssh-ed25519 \S+ texwerk:test$/);
+    assert.equal(await ensureDeployKey(project, 'other'), key, 'the key is created once');
+    const pulled = await pull(project, 'Alice', 'alice@test');
+    assert.ok(pulled.ok, pulled.output);
+    assert.equal(await readFile(join(project, 'paper.tex'), 'utf8'), 'from the remote');
+    // Label and push back.
+    await writeFile(join(project, 'paper.tex'), 'edited in TeXWerk');
+    const labelled = await commitAll(project, 'Edit', 'Alice', 'alice@test', 3);
+    assert.ok(labelled.ok, labelled.output);
+    const pushed = await push(project);
+    assert.ok(pushed.ok, pushed.output);
+    assert.match((await run(remote, ['log', '-1', '--format=%s %an'])).output, /^Edit Alice$/);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});

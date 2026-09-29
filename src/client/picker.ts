@@ -233,7 +233,7 @@ export function showPicker(opts: { me: Me; dismissable: boolean; folder?: string
       });
       return [
         h('h2', {}, 'Clone a git repository'),
-        h('p', { class: 'muted' }, 'Private repositories need the server\'s SSH key as a deploy key (Git… inside a project shows it).'),
+        h('p', { class: 'muted' }, 'For a private repository: create a new project instead, then in Git… set the remote, create the project\'s deploy key, add it to the repository, and Pull.'),
         url, name, out,
         h('div', { class: 'actions' }, h('button', { onclick: closeDialog }, 'Cancel'), goBtn),
       ];

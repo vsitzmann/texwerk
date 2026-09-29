@@ -1,8 +1,7 @@
-import { execFile } from 'node:child_process';
 import { createReadStream, existsSync } from 'node:fs';
 import { mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { homedir, hostname, networkInterfaces } from 'node:os';
+import { hostname, networkInterfaces } from 'node:os';
 import { extname, join, resolve } from 'node:path';
 import { WebSocketServer } from 'ws';
 import { cleanPath, cleanProjectId, cleanProjectName } from '../shared/files.ts';
@@ -326,10 +325,6 @@ export async function startServer(options: ServerOptions) {
     return identity;
   }
 
-  function sshKeyPath(): string {
-    return join(homedir(), '.ssh', 'id_ed25519');
-  }
-
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? '/', 'http://localhost');
     const path = decodeURIComponent(url.pathname);
@@ -566,16 +561,6 @@ export async function startServer(options: ServerOptions) {
       }
     }
 
-    if (path === '/api/ssh-key') {
-      if (access && identity.login !== access.admin) throw new HttpError(403, 'only the admin manages the server key');
-      const pub = `${sshKeyPath()}.pub`;
-      if (method === 'POST' && !existsSync(pub)) {
-        await mkdir(join(homedir(), '.ssh'), { recursive: true, mode: 0o700 });
-        await new Promise<void>((done) => execFile('ssh-keygen', ['-t', 'ed25519', '-N', '', '-C', `texwerk@${hostname()}`, '-f', sshKeyPath()], () => done()));
-      }
-      return json(response, 200, { publicKey: existsSync(pub) ? (await readFile(pub, 'utf8')).trim() : null });
-    }
-
     // Everything below is scoped to one project. Reading needs any role;
     // anything that changes the project needs edit.
     const role = await requireRole(identity, projectParam ?? '', 'view');
@@ -778,7 +763,17 @@ export async function startServer(options: ServerOptions) {
     }
 
     if (path === '/api/git' && method === 'GET') {
-      return json(response, 200, { status: await gitOps.status(project.dir) });
+      return json(response, 200, { status: await gitOps.status(project.dir), deployKey: await gitOps.readDeployKey(project.dir), host: hostname() });
+    }
+
+    if (path === '/api/git/deploy-key' && method === 'POST') {
+      const key = await gitOps.ensureDeployKey(project.dir, `texwerk:${project.name.replace(/\s+/g, '_')}@${hostname()}`);
+      return json(response, 200, { deployKey: key });
+    }
+
+    if (path === '/api/git/test' && method === 'POST') {
+      const r = await gitOps.testRemote(project.dir);
+      return json(response, r.ok ? 200 : 400, r.ok ? { output: r.output } : { error: r.output });
     }
 
     if (path === '/api/git/remote' && method === 'POST') {

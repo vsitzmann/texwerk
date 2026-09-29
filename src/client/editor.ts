@@ -526,7 +526,7 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
       const info = h('div', { class: 'kv' }, h('span', {}, 'loading…'));
       const remote = h('input', { placeholder: 'git@github.com:you/paper.git', spellcheck: 'false' });
       const out = h('pre', { class: 'out', hidden: true });
-      const keyBox = h('div', {});
+      const keyBox = h('div', { class: 'deploy-key' });
       const run = async (label: string, work: () => Promise<{ output?: string }>) => {
         out.hidden = false;
         out.classList.remove('bad');
@@ -541,28 +541,68 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
         await load();
       };
       const load = async () => {
-        const { status } = await api<{ status: { branch: string; remote: string; ahead: number | null; behind: number | null; dirty: boolean; hasCommits: boolean } }>('GET', `/api/git?project=${encodeURIComponent(project)}`);
-        if (document.activeElement !== remote) remote.value = status.remote;
+        const r = await api<{ status: { branch: string; remote: string; ahead: number | null; behind: number | null; dirty: boolean; hasCommits: boolean }; deployKey: string | null; host: string }>('GET', `/api/git?project=${encodeURIComponent(project)}`);
+        const { status } = r;
+        // Filled on first load even though the field has focus; later only if untouched.
+        if (!remote.dataset.loaded || document.activeElement !== remote) remote.value = status.remote;
+        remote.dataset.loaded = '1';
         info.replaceChildren(
           h('span', {}, 'branch'), h('b', {}, status.branch),
           h('span', {}, 'since label'), h('b', {}, !status.hasCommits ? 'no labels yet — label a version to make the first commit' : status.dirty ? 'unlabelled changes' : 'nothing new'),
           h('span', {}, 'remote'), h('b', {}, status.ahead === null ? (status.remote ? 'not pushed yet' : 'none')
             : `${status.ahead} to push, ${status.behind} to pull`));
+        renderKey(r.deployKey, status.remote || remote.value.trim(), r.host);
       };
-      const loadKey = async (generate: boolean) => {
-        const r = await api<{ publicKey: string | null }>(generate ? 'POST' : 'GET', '/api/ssh-key');
-        if (r.publicKey) {
-          const copy = h('button', { onclick: () => void copyText(r.publicKey!).then(() => toast('Copied', 'ok', 1200)) }, 'Copy');
-          keyBox.replaceChildren(
-            h('p', { class: 'muted' }, 'To push to a private repository over SSH, add this server key as a deploy key with write access (GitHub: repo → Settings → Deploy keys).'),
-            h('pre', { class: 'cmd' }, r.publicKey), h('div', { class: 'actions' }, copy));
-        } else {
-          keyBox.replaceChildren(h('p', { class: 'muted' }, 'The server has no SSH key yet. Generate one to push to private repositories over SSH.'),
-            h('div', { class: 'actions' }, h('button', { onclick: () => void loadKey(true) }, 'Generate SSH key')));
+      /** GitHub owner/repo from a remote URL, when it is one. */
+      const githubRepo = (url: string) => /github\.com[:/]([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/.exec(url);
+      const renderKey = (key: string | null, url: string, host: string) => {
+        const ssh = /^(git@|ssh:\/\/)/.test(url);
+        if (url && !ssh) {
+          keyBox.replaceChildren(h('p', { class: 'muted' }, 'This remote uses HTTPS: fine for pulling public repositories. To push, use the SSH address (git@github.com:owner/repo.git) and a deploy key.'));
+          return;
         }
+        if (!key) {
+          keyBox.replaceChildren(
+            h('p', { class: 'muted' }, 'To push to (or pull from) a private repository, this project gets its own SSH key, which you add to that one repository as a deploy key. It can reach that repository and nothing else, and it does not depend on anyone\'s personal account.'),
+            h('div', { class: 'actions' }, h('button', { class: 'primary', onclick: () => void api('POST', `/api/git/deploy-key?project=${encodeURIComponent(project)}`).then(load, (err) => toast((err as Error).message, 'bad')) }, 'Create this project\'s deploy key')));
+          return;
+        }
+        const m = githubRepo(url);
+        const repo = m ? `${m[1]}/${m[2]}` : 'OWNER/REPO';
+        const title = `TeXWerk: ${projectName} (${host})`;
+        const agentText = [
+          `Please give the TeXWerk server push access to the GitHub repository ${repo}, using the GitHub CLI (gh).`,
+          '',
+          ...(m ? [] : [
+            'The TeXWerk project has no GitHub remote yet. First create a private repository for it (ask me for the',
+            `owner and name if unsure; suggested name: ${projectName.replace(/[^\w.-]+/g, '-')}), e.g.:`,
+            '    gh repo create OWNER/REPO --private',
+            'and tell me its SSH address (git@github.com:OWNER/REPO.git) so I can paste it into TeXWerk as the remote.',
+            '',
+          ]),
+          `Then add this SSH public key to ${repo} as a deploy key WITH WRITE ACCESS:`,
+          '',
+          "cat > /tmp/texwerk-deploy-key.pub <<'EOF'",
+          key,
+          'EOF',
+          `gh repo deploy-key add /tmp/texwerk-deploy-key.pub --repo ${repo} --allow-write --title "${title}"`,
+          '',
+          `Check it with: gh repo deploy-key list --repo ${repo}`,
+          'It is a public key; it is safe to share. Do not generate a different key: TeXWerk already holds the private half.',
+        ].join('\n');
+        keyBox.replaceChildren(
+          h('p', {}, 'This project\'s deploy key. Add it to ', m ? h('b', {}, repo) : 'the repository', ' with write access — once:'),
+          h('pre', { class: 'cmd' }, key),
+          h('ul', {},
+            h('li', {}, 'By hand: on GitHub open the repository → Settings → Deploy keys → Add deploy key, paste the key, tick ', h('b', {}, 'Allow write access'), '.'),
+            h('li', {}, 'Or let your agent do it (it needs the GitHub CLI, gh, logged in as someone who administers the repository): copy the instructions below into it.')),
+          h('div', { class: 'actions' },
+            h('button', { onclick: () => void copyText(key).then(() => toast('Key copied', 'ok', 1200)) }, 'Copy key'),
+            h('button', { onclick: () => void copyText(agentText).then(() => toast('Instructions copied — paste them into your agent', 'ok', 2500)) }, 'Copy instructions for your agent'),
+            h('button', { title: 'Check that the server can reach the repository with this key', onclick: () => void run('Testing the connection', () => api('POST', `/api/git/test?project=${encodeURIComponent(project)}`)) }, 'Test connection')),
+          h('details', {}, h('summary', {}, 'Show the instructions for your agent'), h('pre', { class: 'cmd agent-text' }, agentText)));
       };
       void load();
-      void loadKey(false);
       return [
         h('h2', {}, 'Git'),
         h('p', { class: 'muted' }, 'This project is a git repository on the server. Each label is a commit; push sends labels to the remote, pull merges the remote in (unlabelled changes are committed first).'),
@@ -576,7 +616,7 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
           h('button', { onclick: () => void run('Pulling', () => api('POST', `/api/git/pull?project=${encodeURIComponent(project)}`)) }, 'Pull'),
           h('button', { class: 'primary', onclick: () => void run('Pushing', () => api('POST', `/api/git/push?project=${encodeURIComponent(project)}`)) }, 'Push')),
         out,
-        h('h3', {}, 'Server SSH key'),
+        h('h3', {}, 'Deploy key'),
         keyBox,
         h('div', { class: 'actions' }, h('button', { onclick: close }, 'Close')),
       ];
