@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import type { CompileIssue, ProjectSettings } from '../shared/protocol.ts';
@@ -68,6 +68,9 @@ export async function runLatexmk(projectDir: string, settings: ProjectSettings, 
   try { log = await readFile(join(outDir, `${stem}.log`), 'latin1'); } catch { /* no log */ }
   const pdfPath = join(outDir, `${stem}.pdf`);
   const issues = parseLog(log);
+  // BibTeX reports into its own log; a missing style or database there only
+  // shows up as "??" citations otherwise.
+  try { issues.unshift(...parseBibtexLog(await readFile(join(outDir, `${stem}.blg`), 'latin1'), projectDir, main)); } catch { /* no bibtex run */ }
   await writeFile(join(outDir, 'texwerk-output.txt'), output.text);
   const hasErrors = issues.some((i) => i.level === 'error');
   return {
@@ -119,6 +122,34 @@ export function parseLog(log: string): CompileIssue[] {
       const at = /lines? (\d+)/.exec(line);
       push({ level: 'badbox', file: currentFile(lines, i), line: at ? Number(at[1]) : null, message: line.trim() });
     }
+  }
+  return issues;
+}
+
+/** Errors from a BibTeX log, pointed at the line of the main file that caused them. */
+export function parseBibtexLog(blg: string, projectDir: string, mainFile: string): CompileIssue[] {
+  const issues: CompileIssue[] = [];
+  let source = '';
+  try { source = readFileSync(join(projectDir, mainFile), 'utf8'); } catch { /* unreadable */ }
+  const lineOf = (pattern: RegExp) => {
+    const i = source.search(pattern);
+    return i < 0 ? null : source.slice(0, i).split('\n').length;
+  };
+  for (const m of blg.matchAll(/^I couldn't open (style|database) file (\S+)/gm)) {
+    const what = m[1] === 'style' ? 'bibliography style' : 'bibliography database';
+    issues.push({
+      level: 'error',
+      file: mainFile,
+      line: lineOf(m[1] === 'style' ? /\\bibliographystyle\s*\{/ : /\\bibliography\s*\{/),
+      message: `BibTeX could not find the ${what} "${m[2]}" — citations will show as ??`,
+    });
+  }
+  for (const m of blg.matchAll(/^(.*)---line (\d+) of file (\S+)$/gm)) {
+    if (!m[1].trim() || /couldn't open|I found no/.test(m[1])) continue;
+    issues.push({ level: 'error', file: m[3], line: Number(m[2]), message: `BibTeX: ${m[1].trim()}` });
+  }
+  for (const m of blg.matchAll(/^Warning--(.*)$/gm)) {
+    issues.push({ level: 'warning', file: '', line: null, message: `BibTeX: ${m[1].trim()}` });
   }
   return issues;
 }

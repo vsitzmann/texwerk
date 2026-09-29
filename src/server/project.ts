@@ -179,11 +179,30 @@ export class Project {
     for (const [path, ytext] of this.texts) this.pathOfText.set(ytext, path);
   }
 
+  /**
+   * The document to compile when nobody has said. Among files with a
+   * \documentclass, prefer main.tex, then the one whose bibliography style
+   * and inputs actually exist in the project (a leftover copy of the paper
+   * usually points at something that is gone), then shallower paths.
+   */
   guessMainFile(): string {
     const candidates = [...this.texts.keys()].filter((p) => p.endsWith('.tex'));
     const withClass = candidates.filter((p) => /\\documentclass/.test(this.texts.get(p)!.toString()));
-    const pick = (list: string[]) => list.find((p) => p === 'main.tex')
-      ?? list.sort((a, b) => a.split('/').length - b.split('/').length || a.localeCompare(b))[0];
+    const exists = (rel: string, ext: string) => {
+      const clean = rel.trim().replace(/^\.\//, '');
+      return [clean, `${clean}${ext}`].some((p) => this.texts.has(p) || this.bins.has(p));
+    };
+    const score = (p: string) => {
+      const src = this.texts.get(p)!.toString().replace(/(^|[^\\])%.*$/gm, '$1');
+      let s = p === 'main.tex' ? 100 : 0;
+      for (const m of src.matchAll(/\\bibliographystyle\s*\{([^}]+)\}/g)) {
+        // Standard styles (plain, alpha, …) come from TeX Live, not the project.
+        if (m[1].includes('/') && !exists(m[1], '.bst')) s -= 10;
+      }
+      for (const m of src.matchAll(/\\(?:input|include)\s*\{([^}]+)\}/g)) if (!exists(m[1], '.tex')) s -= 3;
+      return s - p.split('/').length;
+    };
+    const pick = (list: string[]) => [...list].sort((a, b) => score(b) - score(a) || a.localeCompare(b))[0];
     return pick(withClass) ?? pick(candidates) ?? '';
   }
 

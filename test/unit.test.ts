@@ -199,3 +199,20 @@ test('deploy key: one per project, used for its remote, and a first pull adopts 
     await rm(base, { recursive: true, force: true });
   }
 });
+
+test('BibTeX errors are reported against the line that caused them', async () => {
+  const { parseBibtexLog } = await import('../src/server/compile.ts');
+  const dir = await mkdtemp(join(tmpdir(), 'texwerk-blg-'));
+  try {
+    await writeFile(join(dir, 'paper.tex'), '\\documentclass{article}\n\\begin{document}\nx\n\\bibliography{refs}\n\\bibliographystyle{styles/icml2024}\n\\end{document}\n');
+    const blg = "I couldn't open style file styles/icml2024.bst\n---line 134 of file paper.aux\n : \\bibstyle{styles/icml2024\nI found no style file---while reading file paper.aux\nWarning--empty journal in foo2020\n";
+    const issues = parseBibtexLog(blg, dir, 'paper.tex');
+    const error = issues.find((i) => i.level === 'error')!;
+    assert.match(error.message, /could not find the bibliography style "styles\/icml2024.bst"/);
+    assert.deepEqual([error.file, error.line], ['paper.tex', 5]);
+    assert.equal(issues.filter((i) => i.level === 'error').length, 1, 'the follow-on "I found no style file" is not a second error');
+    assert.ok(issues.some((i) => i.level === 'warning' && /empty journal/.test(i.message)));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
