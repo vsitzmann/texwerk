@@ -20,8 +20,8 @@ import type { HistoryEntry } from '../shared/protocol.ts';
  * it (see git.ts), but history exists whether or not anyone ever labels.
  */
 
-const IDLE_MS = 20_000;
-const MAX_SPAN_MS = 120_000;
+const IDLE_MS = 5_000;
+const MAX_SPAN_MS = 60_000;
 
 interface Pending {
   authors: Set<string>;

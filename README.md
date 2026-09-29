@@ -28,7 +28,7 @@ No accounts. On a tailnet with `--access`, your tailnet login is your identity.
   are mirrored to `.texwerk/output.pdf` / `.texwerk/output.log`, and
   `node .texwerk/tw compile` compiles on the server and prints the errors.
 - **Full edit history.** Every version of every file is kept (coalesced into
-  steps after 20 s of quiet or 2 minutes of continuous editing). The History
+  steps after 5 s of quiet or 1 minute of continuous editing). The History
   view groups changes by time and author, shows diffs, restores single files
   or the whole project to any point.
 - **Labels are git commits.** Every project folder is a git repository.

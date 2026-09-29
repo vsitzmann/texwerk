@@ -141,7 +141,7 @@ export class Project {
     this.awareness.on('update', (changes: { added: number[]; updated: number[]; removed: number[] }, origin: unknown) =>
       this.onAwareness(changes, origin));
     this.startWatcher();
-    this.flushTimer = setInterval(() => { void this.history.flush(); }, 5000);
+    this.flushTimer = setInterval(() => { void this.history.flush(); }, 1000);
     this.scheduleUnload();
   }
 
