@@ -16,6 +16,8 @@ import {
 } from './access.ts';
 import { Project, type Conn } from './project.ts';
 import { readZip, writeZip } from './zip.ts';
+import { allThreads, commentsMarkdown, sortThreads } from '../shared/comments.ts';
+import { annotatePdf, pdfPosition } from './pdfComments.ts';
 
 /**
  * The TeXWerk server: one HTTP port serving the browser client, a JSON API,
@@ -382,7 +384,20 @@ export async function startServer(options: ServerOptions) {
       await requireRole(identity, id, 'view');
       const project = await getProject(id);
       if (!project.lastPdf) throw new HttpError(404, 'not compiled yet');
-      const download = url.searchParams.has('download') ? `${project.name.split('/').pop()}.pdf` : undefined;
+      const base = project.name.split('/').pop()!;
+      if (url.searchParams.get('comments') === '1') {
+        const threads = sortThreads(allThreads(project.doc)).filter((t) => !t.resolved && t.line !== null);
+        const positions = [];
+        for (const t of threads) positions.push(await pdfPosition(project, t.path, t.line!));
+        const annotated = await annotatePdf(await readFile(project.lastPdf), threads, positions);
+        response.writeHead(200, {
+          'content-type': 'application/pdf', 'cache-control': 'no-store',
+          'content-disposition': contentDisposition('attachment', `${base} (comments).pdf`),
+        });
+        response.end(annotated);
+        return;
+      }
+      const download = url.searchParams.has('download') ? `${base}.pdf` : undefined;
       return sendFile(request, response, project.lastPdf, { download, noStore: true });
     }
 
@@ -555,7 +570,8 @@ export async function startServer(options: ServerOptions) {
     // anything that changes the project needs edit.
     const role = await requireRole(identity, projectParam ?? '', 'view');
     const project = await getProject(projectParam);
-    const reads = method === 'GET' || path === '/api/compile' || path === '/api/synctex/edit' || path === '/api/synctex/view';
+    // Commenting is open to viewers, like "commenter" in Google Docs.
+    const reads = method === 'GET' || ['/api/compile', '/api/synctex/edit', '/api/synctex/view', '/api/synctex/lines', '/api/comments'].includes(path);
     if (!reads && role === 'view') throw new HttpError(403, 'you have view-only access to this project');
     const bodyPath = (p: unknown) => {
       const clean = cleanPath(String(p ?? ''));
@@ -635,6 +651,69 @@ export async function startServer(options: ServerOptions) {
       return json(response, 200, page ? { page, x, y } : { page: null });
     }
 
+    if (path === '/api/comments' && method === 'GET') {
+      return json(response, 200, { threads: sortThreads(allThreads(project.doc)) });
+    }
+
+    if (path === '/api/comments' && method === 'POST') {
+      const body = await readJson<{ op: string; id?: string; messageId?: string; path?: string; from?: number; to?: number; line?: number; quote?: string; text?: string }>(request);
+      const text = String(body.text ?? '').trim().slice(0, 20_000);
+      const moderator = role === 'owner';
+      try {
+        if (body.op === 'create') {
+          if (!text) throw new Error('a comment needs text');
+          const file = bodyPath(body.path);
+          const ytext = project.texts.get(file);
+          if (!ytext) throw new Error(`"${file}" is not a text file in this project`);
+          let { from, to } = body;
+          const content = ytext.toString();
+          if (typeof from !== 'number' || typeof to !== 'number') {
+            // By quote (optionally near a line), or a whole line: how agents point at text.
+            const lineStart = (n: number) => { let at = 0; for (let l = 1; l < n && at >= 0; l++) { at = content.indexOf('\n', at); if (at >= 0) at++; } return at; };
+            if (body.quote) {
+              const near = body.line ? lineStart(body.line) : 0;
+              let best = -1;
+              for (let i = content.indexOf(body.quote); i >= 0; i = content.indexOf(body.quote, i + 1)) {
+                if (best < 0 || Math.abs(i - near) < Math.abs(best - near)) best = i;
+              }
+              if (best < 0) throw new Error('that quote does not appear in the file');
+              from = best;
+              to = best + body.quote.length;
+            } else if (body.line) {
+              const a = lineStart(body.line);
+              if (a < 0 || a > content.length) throw new Error('no such line');
+              let b = content.indexOf('\n', a);
+              if (b < 0) b = content.length;
+              from = a + (content.slice(a, b).length - content.slice(a, b).trimStart().length);
+              to = b;
+              if (to <= from) throw new Error('that line is empty');
+            } else throw new Error('say which text: from/to, quote, or line');
+          }
+          const id = project.createComment(file, from!, to!, text, who, identity.login);
+          return json(response, 200, { id });
+        }
+        const id = String(body.id ?? '');
+        if (body.op === 'reply') { if (!text) throw new Error('empty reply'); project.reply(id, text, who, identity.login); }
+        else if (body.op === 'resolve') project.setResolved(id, true, who);
+        else if (body.op === 'reopen') project.setResolved(id, false, who);
+        else if (body.op === 'edit') { if (!text) throw new Error('empty message'); project.changeMessage(id, String(body.messageId), text, identity.login, moderator); }
+        else if (body.op === 'delete') project.changeMessage(id, String(body.messageId), null, identity.login, moderator);
+        else throw new Error('unknown op');
+      } catch (err) {
+        throw new HttpError(400, (err as Error).message);
+      }
+      return json(response, 200, { ok: true });
+    }
+
+    if (path === '/api/synctex/lines' && method === 'POST') {
+      const body = await readJson<{ items: Array<{ file: string; line: number }> }>(request);
+      const results = [];
+      for (const item of (body.items ?? []).slice(0, 300)) {
+        results.push(project.lastPdf ? await pdfPosition(project, bodyPath(item.file), Number(item.line)) : null);
+      }
+      return json(response, 200, { results });
+    }
+
     if (path === '/api/history' && method === 'GET') {
       await project.history.flush();
       return json(response, 200, { entries: project.history.all(), labels: await gitOps.labels(project.dir) });
@@ -681,6 +760,7 @@ export async function startServer(options: ServerOptions) {
       const r = await gitOps.checkoutTree(project.dir, body.commit);
       if (!r.ok) return json(response, 500, { error: r.output });
       await project.reconcileAll(`${who} (revert)`);
+      await project.loadComments();
       await project.history.flush(true);
       const c = await gitOps.commitAll(project.dir, `Revert to "${body.message}"`, identity.name, identity.login, project.history.lastId());
       project.broadcastEvent({ t: 'git' });
@@ -711,6 +791,7 @@ export async function startServer(options: ServerOptions) {
       await project.history.flush(true);
       const r = await gitOps.pull(project.dir, identity.name, identity.login);
       await project.reconcileAll(`${who} (git pull)`);
+      await project.loadComments();
       project.broadcastEvent({ t: 'git' });
       return json(response, r.ok ? 200 : 400, r.ok ? { output: r.output } : { error: r.output });
     }
@@ -722,13 +803,23 @@ export async function startServer(options: ServerOptions) {
         'content-disposition': contentDisposition('attachment', `${project.name}.zip`),
         'cache-control': 'no-store',
       });
-      await writeZip(response, project.allFiles().map((rel) => ({
-        name: `${project.name}/${rel}`,
+      const base = project.name.split('/').pop()!;
+      const files = project.allFiles().map((rel) => ({
+        name: `${base}/${rel}`,
         load: async () => {
           const t = project.texts.get(rel);
           return t ? Buffer.from(t.toString(), 'utf8') : readFile(join(project.dir, rel));
         },
-      })));
+      }));
+      // The sources never contain comments; they come along only on request.
+      if (url.searchParams.get('comments') === '1') {
+        const threads = sortThreads(allThreads(project.doc));
+        files.push(
+          { name: `${base}/comments.json`, load: async () => Buffer.from(`${JSON.stringify(threads, null, 2)}\n`) },
+          { name: `${base}/comments.md`, load: async () => Buffer.from(commentsMarkdown(base, threads)) },
+        );
+      }
+      await writeZip(response, files);
       response.end();
       return;
     }

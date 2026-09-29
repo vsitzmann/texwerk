@@ -6,7 +6,9 @@ import type { BinInfo, CompileSummary, Identity, ProjectSettings, ServerEvent } 
 import { CodeEditor } from './codeEditor.ts';
 import { FileTree } from './tree.ts';
 import { HistoryView } from './historyView.ts';
-import { Viewer } from './viewer.ts';
+import { Viewer, type PdfPin } from './viewer.ts';
+import { Comments } from './comments.ts';
+import type { CommentThread } from '@shared/comments.ts';
 import { api, copyText, dialog, h, initials, menu, storedName, storeName, toast, withName } from './ui.ts';
 import { showPicker, showShareDialog, type Me } from './picker.ts';
 
@@ -97,7 +99,60 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
     onJumpToSource: (file, line) => openFile(file, line),
     onCloseFile: () => tree.setViewing(null),
     onSyncFromCursor: () => void syncToPdf(),
+    onPinClick: (id, rect) => comments.openThread(id, rect),
+    onPdfLoaded: () => schedulePins(0),
   });
+
+  // ------------------------------------------------------------ comments
+  let pinsTimer: number | undefined;
+  let pinsRequest = 0;
+  const comments = new Comments({
+    project,
+    doc,
+    me: () => me,
+    canModerate: () => meInfo.admin,
+    reveal: (t) => revealThread(t),
+    onChange: () => {
+      updateEditorComments();
+      viewer.setCommentsPanel(comments.panel, comments.openCount);
+      schedulePins(500);
+    },
+  });
+  viewer.setCommentsPanel(comments.panel, comments.openCount);
+
+  function updateEditorComments(): void {
+    if (!current || !currentPath) return;
+    current.setComments(comments.visible(currentPath).map((t) => ({
+      id: t.id, from: t.from!, to: t.to!, color: colorFor(t.login.replace(/:agent$/, '')), replies: t.messages.length,
+    })));
+  }
+
+  function revealThread(t: CommentThread): void {
+    if (t.from === null) { toast('The text this comment was on has been deleted.'); return; }
+    openFile(t.path);
+    setTimeout(() => current?.selectRange(t.from!, t.to!), 0);
+  }
+
+  function schedulePins(delay: number): void {
+    window.clearTimeout(pinsTimer);
+    pinsTimer = window.setTimeout(() => void refreshPins(), delay);
+  }
+  async function refreshPins(): Promise<void> {
+    const threads = comments.visible();
+    if (!viewer.pdfLoaded || !threads.length) { viewer.setPins([]); return; }
+    const request = ++pinsRequest;
+    try {
+      const r = await api<{ results: Array<{ page: number; y: number } | null> }>('POST', `/api/synctex/lines?project=${encodeURIComponent(project)}`,
+        { items: threads.map((t) => ({ file: t.path, line: t.line })) });
+      if (request !== pinsRequest) return;
+      const pins: PdfPin[] = [];
+      threads.forEach((t, i) => {
+        const pos = r.results[i];
+        if (pos) pins.push({ id: t.id, page: pos.page, y: pos.y, color: colorFor(t.login.replace(/:agent$/, '')), title: `${t.messages[0]?.author}: ${t.messages[0]?.text ?? ''}`.slice(0, 200) });
+      });
+      viewer.setPins(pins);
+    } catch { /* no synctex: no pins */ }
+  }
 
   const leftSplit = h('div', { class: 'splitter' });
   const rightSplit = h('div', { class: 'splitter right' });
@@ -236,8 +291,14 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
         onCursor: (l, c) => { statusCursor.textContent = `Ln ${l}, Col ${c}`; },
         onCompile: () => void runCompile(),
         onSyncToPdf: () => void syncToPdf(),
+        onComment: (from, to, rect) => {
+          const quote = ytext.toString().slice(from, to);
+          comments.compose(path, from, to, quote, rect, () => current?.view.focus());
+        },
+        onOpenThread: (ids, rect) => comments.openThread(ids[0], rect),
       });
       currentPath = path;
+      updateEditorComments();
       awareness.setLocalStateField('file', path);
       const isMain = path === settings.mainFile;
       editorHead.replaceChildren(
@@ -543,7 +604,10 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
     const go = (url: string) => { const a = h('a', { href: withName(url) }); document.body.append(a); a.click(); a.remove(); };
     menu(downloadBtn, [
       h('button', { onclick: () => go(`/api/zip?project=${encodeURIComponent(project)}`) }, 'Project as .zip'),
+      h('button', { onclick: () => go(`/api/zip?project=${encodeURIComponent(project)}&comments=1`) }, 'Project as .zip + comments'),
+      h('div', { class: 'menu-sep' }),
       h('button', { disabled: !compile?.hasPdf, onclick: () => go(`/pdf/${encodeURIComponent(project)}/output.pdf?download=1`) }, 'Compiled PDF'),
+      h('button', { disabled: !compile?.hasPdf, title: 'The PDF with each open comment as a sticky note, for any PDF reader', onclick: () => go(`/pdf/${encodeURIComponent(project)}/output.pdf?comments=1`) }, 'Compiled PDF with comments'),
     ]);
   });
 

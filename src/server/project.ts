@@ -15,6 +15,7 @@ import {
   type BinInfo, type CompileSummary, type Identity, type ProjectSettings, type ServerEvent,
 } from '../shared/protocol.ts';
 import { setYText } from '../shared/textDiff.ts';
+import { allThreads, type CommentMessage, type CommentThread, type ThreadMap } from '../shared/comments.ts';
 import { BUILD_DIR, runLatexmk } from './compile.ts';
 import { ensureRepo } from './git.ts';
 import { hashBytes, History } from './history.ts';
@@ -66,6 +67,7 @@ export class Project {
   readonly epoch = randomUUID();
   readonly texts: Y.Map<Y.Text>;
   readonly bins: Y.Map<BinInfo>;
+  readonly comments: Y.Map<ThreadMap>;
   readonly dirs: Y.Map<boolean>;
   readonly awareness: awarenessProtocol.Awareness;
   readonly history: History;
@@ -96,6 +98,7 @@ export class Project {
     this.dir = dir;
     this.texts = this.doc.getMap('text');
     this.bins = this.doc.getMap('bin');
+    this.comments = this.doc.getMap('comments');
     this.dirs = this.doc.getMap('dirs');
     this.awareness = new awarenessProtocol.Awareness(this.doc);
     this.awareness.setLocalState(null);
@@ -135,11 +138,13 @@ export class Project {
       await this.saveSettings();
     }
     await this.restoreLastCompile();
+    await this.loadComments();
 
     this.doc.on('update', (update: Uint8Array, origin: unknown) => this.broadcastUpdate(update, origin));
     this.doc.on('afterTransaction', (tr: Y.Transaction) => this.afterTransaction(tr));
     this.awareness.on('update', (changes: { added: number[]; updated: number[]; removed: number[] }, origin: unknown) =>
       this.onAwareness(changes, origin));
+    this.comments.observeDeep(() => this.scheduleCommentSave(300));
     this.startWatcher();
     this.flushTimer = setInterval(() => { void this.history.flush(); }, 1000);
     this.scheduleUnload();
@@ -301,6 +306,8 @@ export class Project {
       if (author && author !== 'disk-sync') this.history.touch(path, author);
     }
     if (textChanged && this.settings.autoCompile && author !== null) this.scheduleAutoCompile();
+    // Offsets in comments.json follow the text they are attached to.
+    if (textChanged && this.comments.size) this.scheduleCommentSave(2000);
   }
 
   private schedulePersist(path: string): void {
@@ -504,6 +511,8 @@ export class Project {
     const movedTexts = [...this.texts.entries()].filter(([p]) => p === from || p.startsWith(prefix));
     const movedBins = [...this.bins.entries()].filter(([p]) => p === from || p.startsWith(prefix));
     const movedDirs = [...this.dirs.keys()].filter((p) => p === from || p.startsWith(prefix));
+    // Moving a text file makes a new Y.Text, so its comments are re-anchored after.
+    const movedComments = allThreads(this.doc).filter((t) => t.path === from || t.path.startsWith(prefix));
     await mkdir(dirname(join(this.dir, to)), { recursive: true });
     await rename(join(this.dir, from), join(this.dir, to));
     this.ensureParentDirs(to, origin);
@@ -516,6 +525,18 @@ export class Project {
       for (const [p, info] of movedBins) { this.bins.delete(p); this.bins.set(mapPath(p), info); }
       for (const d of movedDirs) { this.dirs.delete(d); this.dirs.set(mapPath(d), true); }
     }, origin);
+    if (movedComments.length) {
+      this.doc.transact(() => {
+        for (const t of movedComments) {
+          const m = this.comments.get(t.id);
+          if (!m) continue;
+          const anchor = this.anchor(mapPath(t.path), t.from, t.to, t.quote);
+          m.set('path', mapPath(t.path));
+          m.set('start', anchor?.start ?? null);
+          m.set('end', anchor?.end ?? null);
+        }
+      }, origin);
+    }
     for (const [p] of [...movedTexts, ...movedBins]) {
       const hash = this.diskHash.get(p);
       this.diskHash.delete(p);
@@ -641,12 +662,156 @@ export class Project {
     }, UNLOAD_AFTER_MS);
   }
 
+  // ---------------------------------------------------------------- comments
+
+  private commentSaveTimer: NodeJS.Timeout | null = null;
+
+  private commentsFile(): string {
+    return join(this.dir, '.texwerk', 'comments.json');
+  }
+
+  private scheduleCommentSave(delay: number): void {
+    if (this.commentSaveTimer) return;
+    this.commentSaveTimer = setTimeout(() => {
+      this.commentSaveTimer = null;
+      this.saveComments();
+    }, delay);
+  }
+
+  /** comments.json: absolute offsets and quotes, readable and diffable in git. */
+  saveComments(): void {
+    if (this.commentSaveTimer) { clearTimeout(this.commentSaveTimer); this.commentSaveTimer = null; }
+    const threads = allThreads(this.doc).sort((a, b) => a.createdAt - b.createdAt);
+    if (!threads.length && !existsSync(this.commentsFile())) return;
+    mkdirSync(join(this.dir, '.texwerk'), { recursive: true });
+    const tmp = `${this.commentsFile()}.${process.pid}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify(threads, null, 2)}\n`);
+    renameSync(tmp, this.commentsFile());
+  }
+
+  /** Relative positions for [from, to) in `path`, found again by quote if the text moved. */
+  private anchor(path: string, from: number | null, to: number | null, quote: string): { start: unknown; end: unknown } | null {
+    const ytext = this.texts.get(path);
+    if (!ytext) return null;
+    const text = ytext.toString();
+    let a = from;
+    let b = to;
+    if (a === null || b === null || b <= a || text.slice(a, b) !== quote) {
+      if (!quote) return null;
+      // The file changed while the server was down: the nearest copy of the quote.
+      let best = -1;
+      for (let i = text.indexOf(quote); i >= 0; i = text.indexOf(quote, i + 1)) {
+        if (best < 0 || Math.abs(i - (from ?? 0)) < Math.abs(best - (from ?? 0))) best = i;
+      }
+      if (best < 0) return null;
+      a = best;
+      b = best + quote.length;
+    }
+    return {
+      start: Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(ytext, a, 0)),
+      end: Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(ytext, b, -1)),
+    };
+  }
+
+  private putThread(t: CommentThread): void {
+    const m = new Y.Map<unknown>();
+    const anchor = this.anchor(t.path, t.from, t.to, t.quote);
+    for (const [k, v] of Object.entries({
+      path: t.path, quote: t.quote, author: t.author, login: t.login, createdAt: t.createdAt,
+      resolved: t.resolved, resolvedBy: t.resolvedBy ?? null, resolvedAt: t.resolvedAt ?? null,
+      start: anchor?.start ?? null, end: anchor?.end ?? null,
+    })) m.set(k, v);
+    const messages = new Y.Array<CommentMessage>();
+    messages.push(t.messages);
+    m.set('messages', messages);
+    this.comments.set(t.id, m);
+  }
+
+  async loadComments(): Promise<void> {
+    let threads: CommentThread[] = [];
+    if (existsSync(this.commentsFile())) {
+      try {
+        threads = JSON.parse(await readFile(this.commentsFile(), 'utf8'));
+        if (!Array.isArray(threads)) throw new Error('not a list');
+      } catch (err) {
+        // A git merge can leave conflict markers in it: keep what we have
+        // rather than wiping every thread on the next save.
+        console.error(`[${this.name}] comments.json unreadable, keeping current threads:`, (err as Error).message);
+        return;
+      }
+    }
+    this.doc.transact(() => {
+      for (const key of [...this.comments.keys()]) this.comments.delete(key);
+      for (const t of threads) if (t && t.id && t.path) this.putThread(t);
+    }, { author: 'disk' });
+  }
+
+  private thread(id: string): ThreadMap {
+    const t = this.comments.get(id);
+    if (!t) throw new Error('no such comment');
+    return t;
+  }
+
+  createComment(path: string, from: number, to: number, text: string, author: string, login: string): string {
+    const ytext = this.texts.get(path);
+    if (!ytext) throw new Error(`"${path}" is not a text file`);
+    const content = ytext.toString();
+    const a = Math.max(0, Math.min(from, content.length));
+    const b = Math.max(a, Math.min(to, content.length));
+    if (b <= a) throw new Error('select some text to comment on');
+    const id = randomUUID().slice(0, 8);
+    const now = Date.now();
+    this.doc.transact(() => this.putThread({
+      id, path, from: a, to: b, line: null, quote: content.slice(a, b), author, login, createdAt: now, resolved: false,
+      messages: [{ id: randomUUID().slice(0, 8), author, login, ts: now, text }],
+    }), { author });
+    return id;
+  }
+
+  reply(id: string, text: string, author: string, login: string): void {
+    const t = this.thread(id);
+    this.doc.transact(() => {
+      (t.get('messages') as Y.Array<CommentMessage>).push([{ id: randomUUID().slice(0, 8), author, login, ts: Date.now(), text }]);
+      // Replying to a resolved thread reopens it: the conversation is live again.
+      if (t.get('resolved')) { t.set('resolved', false); t.set('resolvedBy', null); t.set('resolvedAt', null); }
+    }, { author });
+  }
+
+  setResolved(id: string, resolved: boolean, author: string): void {
+    const t = this.thread(id);
+    this.doc.transact(() => {
+      t.set('resolved', resolved);
+      t.set('resolvedBy', resolved ? author : null);
+      t.set('resolvedAt', resolved ? Date.now() : null);
+    }, { author });
+  }
+
+  /** Edit or delete one message; `mayModerate` lets owners change anyone's. Deleting the first message deletes the thread. */
+  changeMessage(id: string, messageId: string, text: string | null, login: string, mayModerate: boolean): void {
+    const t = this.thread(id);
+    const messages = t.get('messages') as Y.Array<CommentMessage>;
+    const index = messages.toArray().findIndex((m) => m.id === messageId);
+    if (index < 0) throw new Error('no such message');
+    const message = messages.get(index);
+    if (message.login !== login && !mayModerate) throw new Error('you can only change your own messages');
+    this.doc.transact(() => {
+      if (text === null) {
+        if (index === 0) this.comments.delete(id);
+        else messages.delete(index, 1);
+      } else {
+        messages.delete(index, 1);
+        messages.insert(index, [{ ...message, text, edited: Date.now() }]);
+      }
+    }, { author: login });
+  }
+
   async close(): Promise<void> {
     this.stopWatching?.();
     if (this.flushTimer) clearInterval(this.flushTimer);
     if (this.autoCompileTimer) clearTimeout(this.autoCompileTimer);
     if (this.unloadTimer) clearTimeout(this.unloadTimer);
     await this.persistAll();
+    this.saveComments();
     await this.history.flush(true);
     for (const c of this.conns) c.ws.close(1001, 'server shutting down');
     this.doc.destroy();

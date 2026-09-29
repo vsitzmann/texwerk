@@ -9,6 +9,7 @@ import { Provider } from '../shared/provider.ts';
 import { BRIDGE_HEADER, type BinInfo, type CompileSummary, type ServerEvent } from '../shared/protocol.ts';
 import { applyEditsToYText, editsBetween } from '../shared/textDiff.ts';
 import { watchTree } from '../shared/watchTree.ts';
+import { allThreads, commentsMarkdown } from '../shared/comments.ts';
 
 /**
  * texwerk-connect.mjs — mirror a live TeXWerk project into a local folder.
@@ -342,7 +343,21 @@ async function removeLocal(path: string): Promise<void> {
   await rm(abs(path), { recursive: true, force: true });
 }
 
+/** `.texwerk/comments.md`: every thread, current, for agents to read. */
+let commentsTimer: NodeJS.Timeout | null = null;
+function scheduleCommentsFile(): void {
+  if (commentsTimer) return;
+  commentsTimer = setTimeout(() => {
+    commentsTimer = null;
+    void writeFile(join(root, LOCAL_DIR, 'comments.md'), commentsMarkdown(project, allThreads(doc))).catch(() => {});
+  }, 300);
+}
+
 function watchStructure(): void {
+  doc.getMap('comments').observeDeep(() => scheduleCommentsFile());
+  // Line numbers in the digest follow the text.
+  doc.getMap('text').observeDeep(() => { if (doc.getMap('comments').size) scheduleCommentsFile(); });
+  scheduleCommentsFile();
   texts.observe((event) => {
     for (const [key, change] of event.changes.keys) {
       if (change.action === 'delete' || change.action === 'update') {
@@ -537,6 +552,23 @@ Other people are editing the same files right now, in their browsers.
   deletes it for everyone (it stays restorable from the history).
 - Build products (*.aux, *.log, …) and anything under \`.texwerk/\` stay local.
 
+## Comments
+
+People (and agents) leave comments on ranges of text. They are not in the
+.tex files: \`.texwerk/comments.md\` lists every thread — file, line, the
+quoted text, and the conversation — and is kept current while this mirror
+runs. Treat open comments as review feedback addressed to whoever works on
+the text.
+
+    node .texwerk/tw comments                         # open threads (--all for resolved too)
+    node .texwerk/tw reply <id> "Done — shortened."   # answer in a thread
+    node .texwerk/tw resolve <id>                     # when it is addressed (reopen <id> undoes)
+    node .texwerk/tw comment <file> <line> "text"     # comment on a whole line
+    node .texwerk/tw comment <file> <line> "text" --quote "exact words"   # on specific words near that line
+
+When you address a comment, change the text, then reply saying what you did
+and resolve it. Your comments and replies show as "${me} · agent".
+
 ## Compiling
 
 The server compiles the project (latexmk). To compile and see the result:
@@ -558,6 +590,14 @@ const cfg = JSON.parse(require('fs').readFileSync(require('path').join(__dirname
 const name = cfg.name ? '&name=' + encodeURIComponent(cfg.name) : '';
 const base = cfg.origin + '/api/compile?project=' + encodeURIComponent(cfg.project) + name;
 const cmd = process.argv[2] || 'compile';
+const args = process.argv.slice(3);
+const commentsUrl = cfg.origin + '/api/comments?project=' + encodeURIComponent(cfg.project) + name;
+const post = async (body) => {
+  const r = await fetch(commentsUrl, { method: 'POST', headers: { 'x-texwerk-bridge': '1', 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const j = await r.json();
+  if (!r.ok) { console.error(j.error); process.exit(1); }
+  return j;
+};
 const show = (c) => {
   const errors = c.issues.filter((i) => i.level === 'error');
   const warnings = c.issues.filter((i) => i.level === 'warning');
@@ -566,6 +606,36 @@ const show = (c) => {
 };
 (async () => {
   const headers = { 'x-texwerk-bridge': '1' };
+  if (cmd === 'comments') {
+    const r = await fetch(commentsUrl, { headers });
+    const j = await r.json();
+    if (!r.ok) { console.error(j.error); process.exit(1); }
+    const list = j.threads.filter((t) => args.includes('--all') || !t.resolved);
+    if (!list.length) console.log(args.includes('--all') ? 'No comments.' : 'No open comments.');
+    for (const t of list) {
+      console.log('[' + t.id + '] ' + (t.line ? t.path + ':' + t.line : t.path + ' (text deleted)') + (t.resolved ? '  (resolved)' : ''));
+      console.log('  > ' + t.quote.split('\\n').join('\\n  > '));
+      for (const m of t.messages) console.log('  ' + m.author + ': ' + m.text.split('\\n').join('\\n    '));
+      console.log('');
+    }
+    return;
+  }
+  if (cmd === 'reply' || cmd === 'resolve' || cmd === 'reopen') {
+    if (!args[0] || (cmd === 'reply' && !args[1])) { console.error('usage: tw ' + cmd + ' <id>' + (cmd === 'reply' ? ' "text"' : '')); process.exit(2); }
+    await post({ op: cmd, id: args[0], text: args[1] });
+    console.log('ok');
+    return;
+  }
+  if (cmd === 'comment') {
+    const qi = args.indexOf('--quote');
+    const quote = qi >= 0 ? args[qi + 1] : undefined;
+    const rest = qi >= 0 ? args.slice(0, qi).concat(args.slice(qi + 2)) : args;
+    const [file, line, text] = rest;
+    if (!file || !line || !text) { console.error('usage: tw comment <file> <line> "text" [--quote "exact words"]'); process.exit(2); }
+    const j = await post({ op: 'create', path: file, line: Number(line), quote, text });
+    console.log('created ' + j.id);
+    return;
+  }
   if (cmd === 'compile') {
     const r = await fetch(base + '&wait=1', { method: 'POST', headers });
     const j = await r.json();

@@ -60,6 +60,12 @@ export async function commitAll(dir: string, message: string, name: string, emai
   await ensureRepo(dir);
   const add = await git(dir, ['add', '-A']);
   if (!add.ok) return add;
+  // .texwerk/ is excluded from git, except the comment threads, which are
+  // part of the work: every label records them.
+  if (existsSync(join(dir, '.texwerk', 'comments.json'))) {
+    const comments = await git(dir, ['add', '-f', '.texwerk/comments.json']);
+    if (!comments.ok) return comments;
+  }
   const trailer = historyId >= 0 ? ['-m', `TeXWerk-History: ${historyId}`] : [];
   return git(dir, [...authorArgs(name, email), 'commit', '--allow-empty', '-q', '-m', message, ...trailer]);
 }

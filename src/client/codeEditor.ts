@@ -2,8 +2,9 @@ import { EditorState, type Extension } from '@codemirror/state';
 import {
   EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection,
   dropCursor, rectangularSelection, crosshairCursor, highlightSpecialChars, Decoration, type DecorationSet,
+  gutter, GutterMarker, showTooltip, type Tooltip,
 } from '@codemirror/view';
-import { StateEffect, StateField } from '@codemirror/state';
+import { RangeSet, StateEffect, StateField, type EditorState as State } from '@codemirror/state';
 import { defaultKeymap, indentWithTab } from '@codemirror/commands';
 import { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
 import { autocompletion, closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete';
@@ -75,6 +76,113 @@ const flashField = StateField.define<DecorationSet>({
   provide: (f) => EditorView.decorations.from(f),
 });
 
+// ------------------------------------------------------------ comments
+
+/** A comment thread as the editor draws it. */
+export interface CommentMark {
+  id: string;
+  from: number;
+  to: number;
+  color: string;
+  replies: number;
+}
+
+const setCommentsEffect = StateEffect.define<CommentMark[]>();
+
+class CommentMarker extends GutterMarker {
+  readonly ids: string[];
+  readonly color: string;
+  readonly count: number;
+  constructor(ids: string[], color: string, count: number) {
+    super();
+    this.ids = ids;
+    this.color = color;
+    this.count = count;
+  }
+  eq(other: CommentMarker): boolean {
+    return other.ids.join() === this.ids.join() && other.color === this.color && other.count === this.count;
+  }
+  toDOM(): Node {
+    const el = document.createElement('span');
+    el.className = 'cm-comment-marker';
+    el.dataset.threads = this.ids.join(' ');
+    el.style.setProperty('--c', this.color);
+    el.title = this.ids.length > 1 ? `${this.ids.length} comment threads` : `Comment${this.count > 1 ? ` · ${this.count} messages` : ''}`;
+    if (this.ids.length > 1) el.textContent = String(this.ids.length);
+    return el;
+  }
+}
+
+const commentsField = StateField.define<{ marks: CommentMark[]; deco: DecorationSet; gutter: RangeSet<GutterMarker> }>({
+  create: () => ({ marks: [], deco: Decoration.none, gutter: RangeSet.empty }),
+  update(value, tr) {
+    let marks = value.marks;
+    for (const e of tr.effects) if (e.is(setCommentsEffect)) marks = e.value;
+    if (marks === value.marks && !tr.docChanged) return value;
+    if (marks === value.marks) {
+      // Follow typing until the next authoritative update from the Y.Doc.
+      return { marks, deco: value.deco.map(tr.changes), gutter: value.gutter.map(tr.changes) };
+    }
+    return build(marks, tr.state);
+  },
+  provide: (f) => [
+    EditorView.decorations.from(f, (v) => v.deco),
+    gutter({ class: 'cm-comment-gutter', markers: (view) => view.state.field(f).gutter }),
+  ],
+});
+
+function build(marks: CommentMark[], state: State) {
+  const len = state.doc.length;
+  const ranges = [];
+  const byLine = new Map<number, { ids: string[]; color: string; count: number }>();
+  for (const m of marks) {
+    const from = Math.max(0, Math.min(m.from, len));
+    const to = Math.max(from, Math.min(m.to, len));
+    if (to > from) {
+      ranges.push(Decoration.mark({
+        class: 'cm-comment-range',
+        attributes: { 'data-thread': m.id, style: `--c:${m.color}` },
+      }).range(from, to));
+    }
+    const line = state.doc.lineAt(from).from;
+    const entry = byLine.get(line) ?? { ids: [], color: m.color, count: 0 };
+    entry.ids.push(m.id);
+    entry.count += m.replies;
+    byLine.set(line, entry);
+  }
+  const gutterMarks = [...byLine.entries()].sort((a, b) => a[0] - b[0])
+    .map(([pos, e]) => new CommentMarker(e.ids, e.color, e.count).range(pos));
+  return { marks, deco: Decoration.set(ranges, true), gutter: RangeSet.of(gutterMarks, true) };
+}
+
+/** The little Comment button beside a non-empty selection. */
+function commentTooltip(onComment: () => void) {
+  return StateField.define<readonly Tooltip[]>({
+    create: () => [],
+    update(_value, tr) {
+      const sel = tr.state.selection.main;
+      if (sel.empty) return [];
+      return [{
+        pos: sel.head,
+        above: sel.head < sel.anchor,
+        strictSide: false,
+        arrow: false,
+        create: () => {
+          const dom = document.createElement('div');
+          dom.className = 'cm-comment-tip';
+          const b = document.createElement('button');
+          b.textContent = '💬 Comment';
+          b.title = 'Comment on the selected text (Ctrl+Alt+M)';
+          b.addEventListener('mousedown', (e) => { e.preventDefault(); onComment(); });
+          dom.append(b);
+          return { dom };
+        },
+      }];
+    },
+    provide: (f) => showTooltip.computeN([f], (state) => state.field(f)),
+  });
+}
+
 export interface CodeEditorOptions {
   path: string;
   ytext: Y.Text;
@@ -83,6 +191,10 @@ export interface CodeEditorOptions {
   onCompile: () => void;
   onSyncToPdf: () => void;
   readOnly?: boolean;
+  /** Start a comment on the selection. */
+  onComment?: (from: number, to: number, rect: DOMRect) => void;
+  /** Open the given thread(s), shown next to `rect`. */
+  onOpenThread?: (ids: string[], rect: DOMRect) => void;
 }
 
 export class CodeEditor {
@@ -116,14 +228,27 @@ export class CodeEditor {
         highlightSelectionMatches(),
         syntaxHighlighting(tokyo),
         EditorView.lineWrapping,
+        // Read-only refuses edits but keeps the caret and keyboard selection,
+        // so viewers can still select text to comment on.
         EditorState.readOnly.of(Boolean(opts.readOnly)),
-        EditorView.editable.of(!opts.readOnly),
         flashField,
+        commentsField,
+        commentTooltip(() => this.startComment()),
+        EditorView.domEventHandlers({
+          click: (e) => {
+            const range = (e.target as HTMLElement).closest('.cm-comment-range') as HTMLElement | null;
+            if (range && this.view.state.selection.main.empty) {
+              opts.onOpenThread?.([range.dataset.thread!], range.getBoundingClientRect());
+            }
+            return false;
+          },
+        }),
         ...language,
         keymap.of([
           { key: 'Mod-s', preventDefault: true, run: () => { opts.onCompile(); return true; } },
           { key: 'Mod-Enter', preventDefault: true, run: () => { opts.onCompile(); return true; } },
           { key: 'Mod-Alt-ArrowRight', preventDefault: true, run: () => { opts.onSyncToPdf(); return true; } },
+          { key: 'Mod-Alt-m', preventDefault: true, run: () => { this.startComment(); return true; } },
           ...closeBracketsKeymap,
           ...yUndoManagerKeymap,
           ...defaultKeymap,
@@ -143,6 +268,29 @@ export class CodeEditor {
       ],
     });
     this.view = new EditorView({ state, parent });
+    this.onComment = opts.onComment;
+    // Gutter markers sit outside the content DOM that CodeMirror's own
+    // handlers cover, so listen on the whole editor.
+    this.view.dom.addEventListener('mousedown', (e) => {
+      const marker = (e.target as HTMLElement).closest('.cm-comment-marker') as HTMLElement | null;
+      if (!marker) return;
+      e.preventDefault();
+      opts.onOpenThread?.(marker.dataset.threads!.split(' '), marker.getBoundingClientRect());
+    });
+  }
+
+  private readonly onComment?: (from: number, to: number, rect: DOMRect) => void;
+
+  private startComment(): void {
+    const sel = this.view.state.selection.main;
+    if (sel.empty || !this.onComment) return;
+    const coords = this.view.coordsAtPos(sel.to) ?? this.view.coordsAtPos(sel.from);
+    const rect = coords ? new DOMRect(coords.left, coords.top, 1, coords.bottom - coords.top) : this.view.dom.getBoundingClientRect();
+    this.onComment(sel.from, sel.to, rect);
+  }
+
+  setComments(marks: CommentMark[]): void {
+    this.view.dispatch({ effects: setCommentsEffect.of(marks) });
   }
 
   currentLine(): number {
@@ -157,6 +305,20 @@ export class CodeEditor {
       effects: [EditorView.scrollIntoView(target.from, { y: 'center' }), flashEffect.of(target.number)],
     });
     if (focus) this.view.focus();
+  }
+
+  /** Put the caret at a comment's text, scroll it to the middle and flash it. */
+  selectRange(from: number, to: number): void {
+    const len = this.view.state.doc.length;
+    const a = Math.max(0, Math.min(from, len));
+    const b = Math.max(a, Math.min(to, len));
+    this.view.dispatch({
+      // A caret, not a selection: the commented text is already highlighted,
+      // and a selection would pop up the Comment button.
+      selection: { anchor: a },
+      effects: [EditorView.scrollIntoView(b > a ? a : a, { y: 'center' }), flashEffect.of(this.view.state.doc.lineAt(a).number)],
+    });
+    this.view.focus();
   }
 
   revealPosition(pos: number): void {

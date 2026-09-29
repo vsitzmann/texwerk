@@ -14,13 +14,25 @@ pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
  * supports SyncTeX both ways.
  */
 
-type Tab = 'pdf' | 'log' | 'file';
+type Tab = 'pdf' | 'log' | 'comments' | 'file';
+
+/** A comment's pin on the PDF, at its SyncTeX position. */
+export interface PdfPin {
+  id: string;
+  page: number;
+  y: number;
+  color: string;
+  title: string;
+}
 
 export interface ViewerOptions {
   project: string;
   onJumpToSource: (file: string, line: number) => void;
   onCloseFile: () => void;
   onSyncFromCursor: () => void;
+  onPinClick: (id: string, rect: DOMRect) => void;
+  /** A new PDF finished loading (pins need fresh positions). */
+  onPdfLoaded: () => void;
 }
 
 class PdfView {
@@ -35,6 +47,31 @@ class PdfView {
   private loadToken = 0;
   onZoom: (() => void) | null = null;
   onDoubleClick: ((page: number, x: number, y: number) => void) | null = null;
+  onPinClick: ((id: string, rect: DOMRect) => void) | null = null;
+  private pins: PdfPin[] = [];
+
+  /** Pins in the right margin of each page; several on one spot stack. */
+  setPins(pins: PdfPin[]): void {
+    this.pins = pins;
+    this.drawPins();
+  }
+
+  private drawPins(): void {
+    for (const el of this.pagesEl.querySelectorAll('.pdf-pin')) el.remove();
+    const taken = new Map<string, number>();
+    for (const pin of this.pins) {
+      const p = this.pages[pin.page - 1];
+      if (!p) continue;
+      const top = Math.max(0, pin.y * this.scale - 11);
+      const key = `${pin.page}:${Math.round(top / 18)}`;
+      const n = taken.get(key) ?? 0;
+      taken.set(key, n + 1);
+      const el = h('button', { class: 'pdf-pin', title: pin.title, style: `top:${top}px;right:${6 + n * 16}px;--c:${pin.color}` });
+      el.addEventListener('click', (e) => { e.stopPropagation(); this.onPinClick?.(pin.id, el.getBoundingClientRect()); });
+      el.addEventListener('dblclick', (e) => e.stopPropagation());
+      p.el.append(el);
+    }
+  }
 
   constructor() {
     this.scroll.append(this.pagesEl);
@@ -88,6 +125,7 @@ class PdfView {
     this.scroll.scrollLeft = ratioX;
     for (const p of pages) this.observer.observe(p.el);
     void old?.destroy();
+    this.drawPins();
     this.onZoom?.();
   }
 
@@ -123,6 +161,7 @@ class PdfView {
     this.scale = scale;
     this.layout();
     this.scroll.scrollTop = anchor * this.scroll.scrollHeight - this.scroll.clientHeight / 2;
+    this.drawPins();
     for (const p of this.pages) p.rendered = 0;
     for (const p of this.pages) {
       const r = p.el.getBoundingClientRect();
@@ -191,6 +230,8 @@ export class Viewer {
   private showRaw = false;
   private readonly opts: ViewerOptions;
   private lastPdfRev = -1;
+  private commentsPanel: HTMLElement | null = null;
+  private commentCount = 0;
   private loadingPdf = false;
 
   constructor(opts: ViewerOptions) {
@@ -198,6 +239,7 @@ export class Viewer {
     this.root.append(this.tabs, this.body);
     this.pdf.onZoom = () => this.renderTabs();
     this.pdf.onDoubleClick = (page, x, y) => void this.syncToSource(page, x, y);
+    this.pdf.onPinClick = (id, rect) => this.opts.onPinClick(id, rect);
     this.render();
   }
 
@@ -209,9 +251,25 @@ export class Viewer {
       this.lastPdfRev = summary.rev;
       this.loadingPdf = true;
       void this.pdf.load(withName(`/pdf/${encodeURIComponent(this.opts.project)}/output.pdf?rev=${summary.rev}`))
-        .finally(() => { this.loadingPdf = false; this.render(); });
+        .finally(() => { this.loadingPdf = false; this.render(); this.opts.onPdfLoaded(); });
     }
     this.render();
+  }
+
+  setPins(pins: PdfPin[]): void {
+    this.pdf.setPins(pins);
+  }
+
+  get pdfLoaded(): boolean {
+    return this.pdf.loaded;
+  }
+
+  setCommentsPanel(panel: HTMLElement, openCount: number): void {
+    this.commentsPanel = panel;
+    if (openCount !== this.commentCount) {
+      this.commentCount = openCount;
+      this.renderTabs();
+    }
   }
 
   showFile(path: string, hash: string): void {
@@ -260,6 +318,7 @@ export class Viewer {
       tab('log', 'Log',
         errors ? h('span', { class: 'count err' }, String(errors)) : null,
         !errors && warnings ? h('span', { class: 'count warn' }, String(warnings)) : null),
+      tab('comments', 'Comments', this.commentCount ? h('span', { class: 'count' }, String(this.commentCount)) : null),
     ];
     if (this.file) {
       const close = h('span', { class: 'close', title: 'Close' }, '×');
@@ -299,6 +358,8 @@ export class Viewer {
     } else if (this.tab === 'log') {
       this.renderLog();
       content.push(this.logView);
+    } else if (this.tab === 'comments' && this.commentsPanel) {
+      content.push(this.commentsPanel);
     } else if (this.file) {
       this.renderFile();
       content.push(this.fileView);

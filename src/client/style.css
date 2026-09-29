@@ -269,6 +269,109 @@ code { color: var(--cyan); }
 .cm-flash-line { animation: flash 1.4s ease-out; }
 @keyframes flash { from { background: rgb(224 175 104 / 35%); } to { background: transparent; } }
 
+/* ---------------------------------------------------------------- comments */
+
+/* In the text: a highlighter stroke in the author's colour. */
+.cm-comment-range {
+  background: color-mix(in srgb, var(--c) 18%, transparent);
+  border-bottom: 2px solid color-mix(in srgb, var(--c) 70%, transparent);
+  cursor: pointer;
+}
+/* In the gutter: a speech bubble per line, like a breakpoint. */
+.cm-comment-gutter { width: 18px; }
+.cm-comment-gutter .cm-gutterElement { display: flex; align-items: flex-start; justify-content: center; padding: 0 !important; }
+.cm-comment-marker { margin-top: 6px !important; }
+.cm-comment-marker {
+  display: grid;
+  width: 13px;
+  height: 11px;
+  margin-top: 2px;
+  place-items: center;
+  border-radius: 3px 3px 3px 0;
+  background: var(--c);
+  color: var(--bg);
+  font: 700 8px/1 var(--mono);
+  cursor: pointer;
+  position: relative;
+}
+.cm-comment-marker::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: -3px;
+  border-top: 3px solid var(--c);
+  border-right: 4px solid transparent;
+}
+.cm-comment-marker:hover { filter: brightness(1.2); outline: 1px solid var(--text); }
+.cm-tooltip.cm-comment-tip-host, .cm-comment-tip { background: transparent !important; border: 0 !important; }
+.cm-comment-tip button { padding: 2px 8px; border-color: var(--yellow); background: var(--panel); color: var(--yellow); font-size: 11px; box-shadow: 0 4px 14px rgb(0 0 0 / 50%); }
+.cm-comment-tip button:hover { background: var(--panel-2) !important; border-color: var(--yellow) !important; }
+
+.comment-popover {
+  position: fixed;
+  z-index: 1150;
+  display: flex;
+  width: 340px;
+  max-height: min(520px, calc(100vh - 80px));
+  overflow: auto;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: 0 14px 38px rgb(0 0 0 / 55%);
+}
+.comment-popover .actions { display: flex; justify-content: flex-end; gap: 6px; }
+.thread-head { display: flex; align-items: center; gap: 6px; }
+.thread-where { color: var(--accent); font-size: 11px; cursor: pointer; }
+.thread-where:hover { text-decoration: underline; }
+.thread-quote {
+  overflow: hidden;
+  padding: 3px 8px;
+  border-left: 2px solid var(--yellow);
+  color: var(--dim);
+  font-size: 11px;
+  white-space: pre-wrap;
+  max-height: 4.6em;
+}
+.msg { display: flex; flex-direction: column; gap: 2px; padding-top: 6px; border-top: 1px solid var(--line); }
+.msg-head { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+.msg-dot { width: 8px; height: 8px; flex: none; }
+.msg-author { color: var(--text); font-weight: 600; }
+.msg-time { color: var(--muted); font-size: 10.5px; }
+.msg-tools { display: none; gap: 2px; }
+.msg:hover .msg-tools { display: flex; }
+.msg-tools button { padding: 0 5px; font-size: 10px; }
+.msg-text { color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
+.reply-row { display: flex; gap: 6px; align-items: flex-end; }
+.reply-box { flex: 1; min-width: 0; resize: none; font: inherit; }
+
+.comments-view { position: absolute; inset: 0; display: flex; flex-direction: column; }
+.comments-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.comments-toggle { display: flex; align-items: center; gap: 5px; color: var(--dim); font-size: 11px; cursor: pointer; }
+.comments-list { flex: 1; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+.comments-empty { padding: 20px; color: var(--muted); text-align: center; }
+.comments-section { margin-top: 8px; color: var(--muted); font: 600 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+.thread-card { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px solid var(--line); background: var(--panel); cursor: pointer; }
+.thread-card:hover { border-color: var(--muted); }
+.thread-card.selected { border-color: var(--accent); }
+.thread-card.resolved { opacity: .55; }
+.thread-card.resolved:hover { opacity: .8; }
+
+.pdf-pin {
+  position: absolute;
+  z-index: 2;
+  width: 16px;
+  height: 14px;
+  padding: 0;
+  border: 1px solid rgb(0 0 0 / 35%);
+  border-radius: 4px 4px 4px 0;
+  background: var(--c);
+  box-shadow: 0 1px 4px rgb(0 0 0 / 40%);
+  cursor: pointer;
+}
+.pdf-pin:hover { transform: scale(1.2); background: var(--c) !important; border-color: #000 !important; }
+
 /* ---------------------------------------------------------------- viewer */
 
 .viewer-tabs { display: flex; align-items: stretch; height: 32px; min-height: 32px; border-bottom: 1px solid var(--line); background: var(--panel); overflow: hidden; }

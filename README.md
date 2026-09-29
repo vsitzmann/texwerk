@@ -31,6 +31,18 @@ No accounts. On a tailnet with `--access`, your tailnet login is your identity.
   steps after 5 s of quiet or 1 minute of continuous editing). The History
   view groups changes by time and author, shows diffs, restores single files
   or the whole project to any point.
+- **Comments.** Select text and press **💬 Comment** (or Ctrl+Alt+M). The
+  text gets a highlight in the author's colour and a speech-bubble mark in
+  the gutter; the PDF gets a pin in the margin at the same place (via
+  SyncTeX). Threads are conversations: reply, edit, resolve, reopen. The
+  **Comments** tab lists them — open ones in document order, resolved ones
+  greyed at the bottom — and jumps to the text. View-only people can comment.
+  Nothing is written into the .tex files: threads live beside them, stay
+  attached to their words while people type, are committed with every label
+  (`.texwerk/comments.json`), and come along on request as **Project as .zip
+  + comments** or **Compiled PDF with comments** (real PDF sticky notes).
+  Agents see them in `.texwerk/comments.md` and use `node .texwerk/tw
+  comments | comment | reply | resolve`.
 - **Labels are git commits.** Every project folder is a git repository.
   **Label version** commits the whole project, authored by you, and the label
   appears in the history, where the project can be reverted to it. **Git…**
