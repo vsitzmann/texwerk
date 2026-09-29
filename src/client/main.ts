@@ -1,5 +1,5 @@
 import { api, h, storedName, storeName } from './ui.ts';
-import { renderPicker } from './picker.ts';
+import { showPicker, type Me } from './picker.ts';
 import { renderEditor } from './editor.ts';
 
 /**
@@ -9,13 +9,16 @@ import { renderEditor } from './editor.ts';
  */
 async function boot(): Promise<void> {
   const app = document.getElementById('app')!;
-  const me = await api<{ access: boolean; you: { name: string } }>('GET', '/api/me');
+  const me = await api<Me>('GET', '/api/me');
   if (!me.access && !storedName()) {
     await askName(app);
   }
   const project = new URLSearchParams(location.search).get('project');
-  if (project) await renderEditor(app, project, me.access);
-  else await renderPicker(app, me.access);
+  if (project) await renderEditor(app, project, me);
+  else {
+    document.title = 'TeXWerk';
+    showPicker({ me, dismissable: false });
+  }
 }
 
 function askName(app: HTMLElement): Promise<void> {
@@ -29,9 +32,8 @@ function askName(app: HTMLElement): Promise<void> {
       resolve();
     };
     input.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
-    app.replaceChildren(h('div', { class: 'picker' },
-      h('div', { class: 'picker-head' }, h('h1', {}, 'TEXWERK')),
-      h('div', { class: 'dialog', style: 'margin:40px auto' },
+    app.replaceChildren(h('div', { class: 'name-page' },
+      h('div', { class: 'dialog', style: 'margin:80px auto' },
         h('h2', {}, 'Who are you?'),
         h('p', { class: 'muted' }, 'Collaborators see this name next to your cursor and in the history.'),
         input,

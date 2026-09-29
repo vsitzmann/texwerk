@@ -191,6 +191,7 @@ export class Viewer {
   private showRaw = false;
   private readonly opts: ViewerOptions;
   private lastPdfRev = -1;
+  private loadingPdf = false;
 
   constructor(opts: ViewerOptions) {
     this.opts = opts;
@@ -206,7 +207,9 @@ export class Viewer {
     if (log !== undefined) this.log = log;
     if (summary.state === 'done' && summary.hasPdf && summary.rev !== this.lastPdfRev) {
       this.lastPdfRev = summary.rev;
-      void this.pdf.load(withName(`/pdf/${encodeURIComponent(this.opts.project)}/output.pdf?rev=${summary.rev}`)).then(() => this.render());
+      this.loadingPdf = true;
+      void this.pdf.load(withName(`/pdf/${encodeURIComponent(this.opts.project)}/output.pdf?rev=${summary.rev}`))
+        .finally(() => { this.loadingPdf = false; this.render(); });
     }
     this.render();
   }
@@ -264,6 +267,8 @@ export class Viewer {
       items.push(tab('file', h('span', { class: 'fname' }, this.file.path.split('/').pop()!), close));
     }
     const tools = h('div', { class: 'tools' });
+    // A large PDF takes a moment to arrive; until then the old one stays up.
+    if (this.loadingPdf) tools.append(h('span', { class: 'loading', title: 'The new PDF is being downloaded and rendered' }, 'loading new PDF…'));
     if (this.tab === 'pdf' && this.pdf.loaded) {
       tools.append(
         h('button', { class: 'ghost icon', title: 'Go to the cursor position in the PDF (Ctrl+Alt+→)', onclick: () => this.opts.onSyncFromCursor() }, '⇢'),

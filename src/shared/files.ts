@@ -70,7 +70,18 @@ export function cleanPath(raw: string): string | null {
   return parts.join('/');
 }
 
-/** A valid project (top-level folder) name. */
+/**
+ * A project id: its path under the projects root, folders included
+ * ("Lab/2027/Paper"). Every segment must be a valid name.
+ */
+export function cleanProjectId(raw: string): string | null {
+  if (typeof raw !== 'string') return null;
+  const parts = raw.split('/').map((p) => cleanProjectName(p));
+  if (!parts.length || parts.some((p) => p === null)) return null;
+  return parts.join('/');
+}
+
+/** A valid single project or folder name. */
 export function cleanProjectName(raw: string): string | null {
   if (typeof raw !== 'string') return null;
   const name = raw.trim();

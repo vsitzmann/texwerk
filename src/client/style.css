@@ -477,8 +477,8 @@ code { color: var(--cyan); }
 
 .toast {
   position: fixed;
+  top: 46px;
   right: 16px;
-  bottom: 36px;
   z-index: 1200;
   max-width: 420px;
   padding: 9px 12px;
@@ -504,36 +504,116 @@ code { color: var(--cyan); }
 
 /* ---------------------------------------------------------------- picker */
 
-.picker { max-width: 980px; margin: 0 auto; padding: 28px 20px 60px; }
-.picker-head { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
-.picker-head h1 { margin: 0; color: var(--accent); font: 700 18px var(--mono); letter-spacing: .08em; }
-.picker-head .tag { color: var(--muted); }
-.picker-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
-.picker-list { border: 1px solid var(--line); background: var(--panel); }
+/* The projects browser — DeckWerk's deck picker: it takes the window, a
+   frame of overlay around a header, a scrolling list of rows in columns,
+   and a footer of actions. */
+.picker-overlay {
+  display: grid;
+  position: fixed;
+  inset: 0;
+  z-index: 950;
+  place-items: center;
+  background: rgb(4 5 8 / 82%);
+  backdrop-filter: blur(8px);
+}
+.picker-overlay.landing { background: var(--bg); backdrop-filter: none; }
+.picker {
+  --picker-columns: minmax(0, 1fr) 110px 110px 90px 190px 110px;
+  --picker-gutter: 18px;
+  display: flex;
+  width: calc(100vw - 48px);
+  height: calc(100vh - 48px);
+  flex-direction: column;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: 0 24px 90px rgb(0 0 0 / 65%);
+  outline: none;
+  overflow: hidden;
+}
+.picker-head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 14px;
+  padding: 14px var(--picker-gutter);
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+}
+.picker-head h2 { flex: none; margin: 0; color: var(--accent); font: 600 14px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+.picker-who { flex: none; color: var(--dim); font-size: 11px; }
+.picker-trail { display: flex; flex: 1; min-width: 0; flex-wrap: wrap; align-items: center; gap: 4px; }
+.picker-crumb { padding: 2px 6px; }
+.picker-crumb:disabled { opacity: 1; font-weight: 600; }
+.picker-crumb-sep { color: var(--muted); }
+.picker-columns { flex: none; padding: 6px var(--picker-gutter); border-bottom: 1px solid var(--line); }
+.picker-columns .picker-row { color: var(--muted); font: 600 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+.picker-list { display: flex; flex: 1; min-height: 0; flex-direction: column; gap: 1px; padding: 10px var(--picker-gutter); overflow-y: auto; }
+.picker-foot { display: flex; flex: none; align-items: center; gap: 8px; padding: 12px var(--picker-gutter); border-top: 1px solid var(--line); background: var(--panel-2); }
+.picker-foot .picker-progress { flex: 1; min-width: 0; margin: 0; padding: 7px 9px; border: 1px solid var(--line); background: var(--bg); font-size: 11px; }
+.picker-footer-actions { display: flex; flex: none; gap: 8px; margin-left: auto; }
+.picker-group { margin-top: 14px; color: var(--muted); font: 600 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+.picker-group:first-child { margin-top: 0; }
+.picker-row-group { display: flex; gap: 6px; align-items: center; }
+.picker-row-group .picker-row { flex: 1; min-width: 0; }
+.picker-actions { display: flex; flex: none; width: 250px; gap: 4px; justify-content: flex-end; }
 .picker-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 190px 150px auto;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  background: none;
+  color: inherit;
+  font: inherit;
   gap: 12px;
+  grid-template-columns: var(--picker-columns);
   align-items: center;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--line);
-  color: var(--text);
-  text-decoration: none;
+  text-align: left;
 }
-.picker-row:last-child { border-bottom: 0; }
-.picker-row:hover { background: var(--panel-2); }
-.picker-row .pname { overflow: hidden; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-.picker-row .pname::before { content: 'TEX'; margin-right: 10px; color: var(--accent); font-size: 9.5px; font-weight: 400; letter-spacing: .04em; }
-.picker-row .people { overflow: hidden; color: var(--green); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.picker-row .when { color: var(--dim); font-size: 11px; }
-.picker-row .row-actions { visibility: hidden; }
-.picker-row:hover .row-actions { visibility: visible; }
-.picker-empty { padding: 30px; color: var(--muted); text-align: center; }
-.picker-foot { margin-top: 18px; color: var(--muted); font-size: 11px; line-height: 1.7; }
+button.picker-row:hover { border-color: var(--line); background: var(--panel-2); }
+button.picker-row.active { border-color: var(--accent); }
+.picker-name, .picker-cell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-cell { color: var(--muted); font: 500 11px var(--mono); }
+.picker-live { color: var(--accent) !important; font-weight: 600 !important; }
+.picker-folder .picker-name::before { content: '📁  '; }
+.picker-row-button { flex: none; }
+
+/* Share dialog: two questions — which people, then everyone else. */
+.share-body { display: flex; flex-direction: column; gap: 16px; }
+.share-owner { color: var(--muted) !important; }
+.share-field { display: flex; flex-direction: column; gap: 5px; color: var(--dim); }
+.share-section { display: flex; flex-direction: column; gap: 8px; }
+.share-section h3 { margin: 0; color: var(--muted); font: 600 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+.share-people { display: flex; flex-direction: column; }
+.share-person { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 0; border-top: 1px solid var(--line); }
+.share-person:first-child { border-top: 0; }
+.share-person-who { display: flex; flex-direction: column; min-width: 0; }
+.share-person-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.share-person-login { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.share-person-controls { display: inline-flex; flex: none; align-items: center; gap: 4px; }
+.share-role-fixed { flex: none; color: var(--muted); font-size: 12px; }
+.share-general { display: flex; gap: 6px; align-items: center; }
+.share-note { min-height: 2.6em; margin: 0; color: var(--muted) !important; font-size: 12px; line-height: 1.5; }
+.share-copy { margin-right: auto; }
+.share-add { display: flex; gap: 6px; }
+.share-add input { flex: 1; min-width: 0; }
+
+.readonly-badge { padding: 1px 6px; border: 1px solid var(--yellow); color: var(--yellow); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
+
+button.busy { opacity: .75; cursor: progress; }
+.statusbar .flash { animation: flash-text 1.2s ease-out; }
+@keyframes flash-text { from { color: var(--text); background: rgb(158 206 106 / 20%); } to { background: transparent; } }
+.viewer-tabs .loading { padding: 0 6px; color: var(--yellow); font-size: 10.5px; }
+.pane-toggle { display: none; }
 
 @media (max-width: 900px) {
-  .body { grid-template-columns: 180px 4px minmax(0, 1fr) 0 0; }
-  .body > .viewer-pane, .body > .splitter.right { display: none; }
-  .picker-row { grid-template-columns: minmax(0, 1fr) auto; }
-  .picker-row .people, .picker-row .when { display: none; }
+  .pane-toggle { display: inline-block; }
+  .toolbar > button:not(.pane-toggle):not(.primary), .toolbar .presence { display: none; }
+  /* One pane at a time: a flex row, so hidden panes leave no empty columns. */
+  .body { display: flex; }
+  .body > .pane, .body > .history { flex: 1; min-width: 0; }
+  .body > .tree-pane, .body > .splitter, .body > .viewer-pane { display: none; }
+  .body.show-viewer > .viewer-pane { display: flex; }
+  .body.show-viewer > .pane:not(.viewer-pane) { display: none; }
+  .picker { --picker-columns: minmax(0, 1fr) 90px; width: 100vw; height: 100vh; }
+  .picker-row .picker-cell:nth-child(n+4) { display: none; }
+  .picker-actions { width: auto; }
 }

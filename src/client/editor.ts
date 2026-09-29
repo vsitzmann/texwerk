@@ -8,6 +8,7 @@ import { FileTree } from './tree.ts';
 import { HistoryView } from './historyView.ts';
 import { Viewer } from './viewer.ts';
 import { api, copyText, dialog, h, initials, menu, storedName, storeName, toast, withName } from './ui.ts';
+import { showPicker, showShareDialog, type Me } from './picker.ts';
 
 /**
  * The project editor: file tree | code editor | PDF viewer, with live
@@ -21,8 +22,11 @@ interface PeerState {
   cursor?: unknown;
 }
 
-export async function renderEditor(app: HTMLElement, project: string, access: boolean): Promise<void> {
-  document.title = `${project} — TeXWerk`;
+export async function renderEditor(app: HTMLElement, project: string, meInfo: Me): Promise<void> {
+  const access = meInfo.access;
+  const projectName = project.split('/').pop()!;
+  document.title = `${projectName} — TeXWerk`;
+  let readOnly = false;
   const doc = new Y.Doc();
   const texts = doc.getMap<Y.Text>('text');
   const bins = doc.getMap<BinInfo>('bin');
@@ -37,6 +41,12 @@ export async function renderEditor(app: HTMLElement, project: string, access: bo
 
   // ------------------------------------------------------------ chrome
   const presenceEl = h('div', { class: 'presence' });
+  const brand = h('a', { class: 'brand', href: './', title: 'All projects' }, '‹ TEXWERK');
+  brand.addEventListener('click', (e) => {
+    if (e.ctrlKey || e.metaKey || e.shiftKey || e.button !== 0) return;
+    e.preventDefault();
+    showPicker({ me: meInfo, dismissable: true, current: project });
+  });
   const compileBtn = h('button', { class: 'primary', title: 'Compile (Ctrl+S / Ctrl+Enter)' }, '▶ Recompile');
   const compileMore = h('button', { class: 'primary', title: 'Compile settings' }, '▾');
   const historyBtn = h('button', { title: 'Full edit history, labelled versions' }, 'History');
@@ -44,15 +54,24 @@ export async function renderEditor(app: HTMLElement, project: string, access: bo
   const gitBtn = h('button', { title: 'Git remote, push and pull' }, 'Git…');
   const agentBtn = h('button', { title: 'Mirror this project to your computer for your editor or agent' }, 'Agent…');
   const downloadBtn = h('button', { title: 'Download' }, 'Download ▾');
+  const shareBtn = h('button', { title: 'Who can open and edit this project' }, 'Share…');
+  // Narrow windows show one of editor and viewer at a time.
+  const paneToggle = h('button', { class: 'pane-toggle', title: 'Switch between the editor and the PDF' }, 'PDF');
+  paneToggle.addEventListener('click', () => {
+    const showing = body.classList.toggle('show-viewer');
+    paneToggle.textContent = showing ? 'Editor' : 'PDF';
+  });
+  const roBadge = h('span', { class: 'readonly-badge', title: 'You have view-only access to this project', hidden: true }, 'view only');
   const toolbar = h('div', { class: 'toolbar' },
-    h('a', { class: 'brand', href: './', title: 'All projects' }, '‹ TEXWERK'),
+    brand,
     h('span', { class: 'sep' }),
-    h('span', { class: 'title', title: project }, project),
+    h('span', { class: 'title', title: project }, projectName),
+    roBadge,
     h('span', { class: 'group' }, compileBtn, compileMore),
     h('span', { class: 'spacer' }),
     presenceEl,
     h('span', { class: 'sep' }),
-    historyBtn, labelBtn, gitBtn, agentBtn, downloadBtn);
+    historyBtn, labelBtn, gitBtn, agentBtn, ...(access ? [shareBtn] : []), downloadBtn, paneToggle);
 
   const statusConn = h('span', {}, h('span', { class: 'dot' }), 'connecting');
   const statusCompile = h('span', {});
@@ -140,6 +159,10 @@ export async function renderEditor(app: HTMLElement, project: string, access: bo
     if (event.t === 'hello') {
       me = event.you;
       settings = event.settings;
+      if (event.readOnly !== readOnly) {
+        readOnly = event.readOnly;
+        applyReadOnly();
+      }
       awareness.setLocalStateField('user', { name: me.name, color: me.color, colorLight: `${me.color}33` });
       setCompile(event.compile);
       void api<{ compile: CompileSummary; output: string; log: string }>('GET', `/api/compile?project=${encodeURIComponent(project)}`)
@@ -162,6 +185,20 @@ export async function renderEditor(app: HTMLElement, project: string, access: bo
       toast(event.message);
     }
   }
+
+  /** View-only access: nothing on screen may look like it changes the project. */
+  function applyReadOnly(): void {
+    roBadge.hidden = !readOnly;
+    for (const b of [compileMore, labelBtn, gitBtn, agentBtn]) b.hidden = readOnly;
+    tree.setReadOnly(readOnly);
+    if (currentPath) {
+      const path = currentPath;
+      currentPath = null;
+      openFile(path);
+    }
+  }
+
+  shareBtn.addEventListener('click', () => showShareDialog(project, meInfo));
 
   // ------------------------------------------------------------ files
   function showPlaceholder(): void {
@@ -194,6 +231,7 @@ export async function renderEditor(app: HTMLElement, project: string, access: bo
       current = new CodeEditor(editorHost, {
         path,
         ytext,
+        readOnly,
         awareness,
         onCursor: (l, c) => { statusCursor.textContent = `Ln ${l}, Col ${c}`; },
         onCompile: () => void runCompile(),
@@ -277,21 +315,47 @@ export async function renderEditor(app: HTMLElement, project: string, access: bo
   }
 
   // ------------------------------------------------------------ compile
+  let compileClickedAt = 0;
+  let compileLabelTimer: number | undefined;
   function setCompile(summary: CompileSummary): void {
     compile = summary;
     viewer.setCompile(summary);
     const running = summary.state === 'running';
-    compileBtn.textContent = running ? '… Compiling' : '▶ Recompile';
+    // A compile with nothing to do finishes in a tenth of a second; keep the
+    // busy state up long enough to be seen, so a click visibly did something.
+    window.clearTimeout(compileLabelTimer);
+    const shownFor = Date.now() - compileClickedAt;
+    if (running || shownFor < 700) {
+      compileBtn.textContent = '… Compiling';
+      compileBtn.classList.add('busy');
+      if (!running) compileLabelTimer = window.setTimeout(() => setCompile(summary), 700 - shownFor);
+      if (!running) return;
+    } else {
+      compileBtn.textContent = '▶ Recompile';
+      compileBtn.classList.remove('busy');
+    }
     const errors = summary.issues.filter((i) => i.level === 'error').length;
     if (running) statusCompile.replaceChildren(h('span', { class: 'dot warn' }), `compiling${summary.by ? ` (${summary.by})` : ''}…`);
     else if (summary.rev === 0) statusCompile.replaceChildren(h('span', { class: 'dot' }), 'not compiled');
     else statusCompile.replaceChildren(h('span', { class: `dot ${summary.ok ? 'ok' : errors ? 'bad' : 'warn'}` }),
-      summary.ok ? `compiled ${new Date(summary.finishedAt).toLocaleTimeString()}` : `${errors} error${errors === 1 ? '' : 's'}`);
+      summary.ok
+        ? (summary.upToDate ? `up to date — nothing changed since the last compile (${new Date(summary.finishedAt).toLocaleTimeString()})` : `compiled ${new Date(summary.finishedAt).toLocaleTimeString()}`)
+        : `${errors} error${errors === 1 ? '' : 's'}`);
+    if (!running && compileClickedAt && Date.now() - compileClickedAt < 5 * 60_000 && summary.by === me.name) {
+      compileClickedAt = 0;
+      if (summary.upToDate && summary.ok) toast('Already up to date — nothing changed since the last compile.', '', 2200);
+      statusCompile.classList.remove('flash');
+      void statusCompile.offsetWidth;
+      statusCompile.classList.add('flash');
+    }
   }
 
-  async function runCompile(): Promise<void> {
+  async function runCompile(clean = false): Promise<void> {
+    compileClickedAt = Date.now();
+    compileBtn.textContent = '… Compiling';
+    compileBtn.classList.add('busy');
     try {
-      await api('POST', `/api/compile?project=${encodeURIComponent(project)}`);
+      await api('POST', `/api/compile?project=${encodeURIComponent(project)}${clean ? '&clean=1' : ''}`);
     } catch (err) { toast((err as Error).message, 'bad'); }
   }
 
@@ -330,6 +394,7 @@ export async function renderEditor(app: HTMLElement, project: string, access: bo
       h('div', { class: 'menu-field' }, h('span', { class: 'muted' }, 'engine'), engine),
       h('div', { class: 'menu-sep' }),
       h('button', { onclick: () => viewer.showTab('log') }, 'Show compile log'),
+      h('button', { title: 'Delete all build files (aux, bbl, …) and compile again', onclick: () => void runCompile(true) }, 'Recompile from scratch'),
     ]);
   });
 

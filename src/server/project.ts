@@ -40,6 +40,8 @@ export interface Conn {
   ws: WebSocket;
   identity: Identity;
   bridge: boolean;
+  /** View-only: may read and show a caret, never change the document. */
+  readOnly: boolean;
   awarenessIds: Set<number>;
 }
 
@@ -213,7 +215,7 @@ export class Project {
     this.conns.add(conn);
     if (this.unloadTimer) { clearTimeout(this.unloadTimer); this.unloadTimer = null; }
     this.sendEvent(conn, {
-      t: 'hello', epoch: this.epoch, you: conn.identity, project: this.name, readOnly: false, compile: this.compile, settings: this.settings,
+      t: 'hello', epoch: this.epoch, you: conn.identity, project: this.name, readOnly: conn.readOnly, compile: this.compile, settings: this.settings,
     });
     const enc = encoding.createEncoder();
     encoding.writeVarUint(enc, MSG_SYNC);
@@ -240,7 +242,13 @@ export class Project {
     if (type === MSG_SYNC) {
       const enc = encoding.createEncoder();
       encoding.writeVarUint(enc, MSG_SYNC);
-      syncProtocol.readSyncMessage(dec, enc, this.doc, conn);
+      if (conn.readOnly) {
+        // A viewer may ask for the document (step 1) but never send changes.
+        if (decoding.readVarUint(dec) !== syncProtocol.messageYjsSyncStep1) return;
+        syncProtocol.readSyncStep1(dec, enc, this.doc);
+      } else {
+        syncProtocol.readSyncMessage(dec, enc, this.doc, conn);
+      }
       if (encoding.length(enc) > 1) conn.ws.send(encoding.toUint8Array(enc));
     } else if (type === MSG_AWARENESS) {
       awarenessProtocol.applyAwarenessUpdate(this.awareness, decoding.readVarUint8Array(dec), conn);
@@ -556,8 +564,11 @@ export class Project {
     }, AUTO_COMPILE_DELAY_MS);
   }
 
+  private cleanNext = false;
+
   /** Compile now, or right after the running compile if one is in flight. */
-  requestCompile(by: string): Promise<void> {
+  requestCompile(by: string, clean = false): Promise<void> {
+    if (clean) this.cleanNext = true;
     if (this.compiling) {
       this.compileQueued = by;
       return this.compiling;
@@ -581,7 +592,12 @@ export class Project {
     }
     this.compile = { ...this.compile, state: 'running', startedAt: Date.now(), by, mainFile: this.settings.mainFile };
     this.broadcastEvent({ t: 'compile', compile: this.compile });
-    const run = await runLatexmk(this.dir, this.settings);
+    const clean = this.cleanNext;
+    this.cleanNext = false;
+    // After a failed or PDF-less run, "nothing changed" is not an answer.
+    const force = this.compile.rev > 0 && (!this.compile.ok || !this.lastPdf);
+    const run = await runLatexmk(this.dir, this.settings, { force, clean });
+    if (clean && !run.pdf) this.lastPdf = null;
     if (run.pdf) this.lastPdf = run.pdf;
     this.lastOutput = run.output;
     this.lastLog = run.log;
@@ -595,6 +611,7 @@ export class Project {
       by,
       mainFile: this.settings.mainFile,
       issues: run.issues,
+      upToDate: run.upToDate,
     };
     await writeFile(join(this.dir, BUILD_DIR, 'texwerk-compile.json'), JSON.stringify({ ...this.compile, pdf: this.lastPdf }));
     this.broadcastEvent({ t: 'compile', compile: this.compile });

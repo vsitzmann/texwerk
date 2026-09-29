@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import type { CompileIssue, ProjectSettings } from '../shared/protocol.ts';
 
@@ -19,6 +19,7 @@ const TIMEOUT_MS = 240_000;
 
 export interface CompileRun {
   ok: boolean;
+  upToDate: boolean;
   pdf: string | null;
   output: string;
   log: string;
@@ -31,16 +32,23 @@ const ENGINE_FLAG: Record<ProjectSettings['engine'], string> = {
   lualatex: '-pdflua',
 };
 
-export async function runLatexmk(projectDir: string, settings: ProjectSettings): Promise<CompileRun> {
+/**
+ * `force` reruns TeX even when latexmk thinks nothing changed — after a failed
+ * run the sources may be the same while the environment is not (a package
+ * installed, a figure fixed outside the project). `clean` empties the build
+ * directory first ("Recompile from scratch").
+ */
+export async function runLatexmk(projectDir: string, settings: ProjectSettings, opts: { force?: boolean; clean?: boolean } = {}): Promise<CompileRun> {
   const outDir = join(projectDir, BUILD_DIR);
+  if (opts.clean) await rm(outDir, { recursive: true, force: true });
   await mkdir(outDir, { recursive: true });
   const main = settings.mainFile;
   if (!main || !existsSync(join(projectDir, main))) {
-    return { ok: false, pdf: null, output: `Main file "${main}" not found. Choose a main file in the compile menu.`, log: '', issues: [] };
+    return { ok: false, upToDate: false, pdf: null, output: `Main file "${main}" not found. Choose a main file in the compile menu.`, log: '', issues: [] };
   }
   const args = [
     ENGINE_FLAG[settings.engine] ?? '-pdf',
-    '-f', '-interaction=nonstopmode', '-file-line-error', '-synctex=1',
+    '-f', ...(opts.force ? ['-g'] : []), '-interaction=nonstopmode', '-file-line-error', '-synctex=1',
     `-outdir=${outDir}`, main,
   ];
   const output = await new Promise<{ code: number | null; text: string }>((resolve) => {
@@ -64,6 +72,7 @@ export async function runLatexmk(projectDir: string, settings: ProjectSettings):
   const hasErrors = issues.some((i) => i.level === 'error');
   return {
     ok: output.code === 0 && !hasErrors,
+    upToDate: /All targets .* are up-to-date/.test(output.text),
     pdf: existsSync(pdfPath) ? pdfPath : null,
     output: output.text,
     log,

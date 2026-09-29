@@ -50,17 +50,19 @@ export class FileTree {
   private presence = new Map<string, string[]>();
   private renaming: string | null = null;
   private renderQueued = false;
+  private readOnly = false;
+  private readonly headButtons: HTMLElement[] = [];
 
   constructor(opts: TreeOptions) {
     this.opts = opts;
     try { for (const p of JSON.parse(localStorage.getItem(`texwerk-collapsed:${opts.project}`) ?? '[]')) this.collapsed.add(p); } catch { /* none */ }
-    const head = h('div', { class: 'pane-head' },
-      h('span', { class: 'label' }, 'Files'),
-      h('span', { class: 'spacer' }),
+    this.headButtons.push(
       h('button', { class: 'ghost icon', title: 'New file', onclick: () => void this.newFile('') }, '+file'),
       h('button', { class: 'ghost icon', title: 'New folder', onclick: () => void this.newFolder('') }, '+dir'),
       h('button', { class: 'ghost icon', title: 'Upload files', onclick: () => this.pickUpload('') }, '↑'));
-    this.root.append(head, this.list, h('div', { class: 'tree-hint' }, 'Drop files or folders here to upload.'));
+    const head = h('div', { class: 'pane-head' }, h('span', { class: 'label' }, 'Files'), h('span', { class: 'spacer' }), ...this.headButtons);
+    this.hint = h('div', { class: 'tree-hint' }, 'Drop files or folders here to upload.');
+    this.root.append(head, this.list, this.hint);
     for (const map of [opts.texts, opts.bins, opts.dirs]) map.observe(() => this.queueRender());
     this.bindDrop(this.list, () => '');
     this.list.addEventListener('contextmenu', (e) => {
@@ -68,6 +70,16 @@ export class FileTree {
       e.preventDefault();
       menuAt(e.clientX, e.clientY, this.folderMenu(''));
     });
+    this.render();
+  }
+
+  private hint: HTMLElement;
+
+  /** Viewers browse and download; nothing that changes the project is offered. */
+  setReadOnly(readOnly: boolean): void {
+    this.readOnly = readOnly;
+    for (const b of this.headButtons) b.hidden = readOnly;
+    this.hint.hidden = readOnly;
     this.render();
   }
 
@@ -143,7 +155,7 @@ export class FileTree {
     const row = h('div', {
       class: `tree-row${this.selected === node.path ? ' selected' : ''}${this.viewing === node.path ? ' viewing' : ''}`,
       style: `padding-left:${8 + depth * 14}px`,
-      draggable: 'true',
+      draggable: this.readOnly ? 'false' : 'true',
       title: node.path,
     },
     h('span', { class: 'twisty' }, node.dir ? (this.collapsed.has(node.path) ? '▸' : '▾') : ''),
@@ -207,6 +219,13 @@ export class FileTree {
   }
 
   private fileMenu(path: string): HTMLElement[] {
+    if (this.readOnly) {
+      const dl = withName(`/raw/${encodeURIComponent(this.opts.project)}/${path.split('/').map(encodeURIComponent).join('/')}?download=1`);
+      return [
+        h('button', { onclick: () => this.opts.onOpen(path) }, 'Open'),
+        h('button', { onclick: () => { const a = h('a', { href: dl }); document.body.append(a); a.click(); a.remove(); } }, 'Download'),
+      ];
+    }
     const url = withName(`/raw/${encodeURIComponent(this.opts.project)}/${path.split('/').map(encodeURIComponent).join('/')}?download=1`);
     const items: HTMLElement[] = [
       h('button', { onclick: () => this.opts.onOpen(path) }, 'Open'),
@@ -221,6 +240,7 @@ export class FileTree {
   }
 
   private folderMenu(path: string): HTMLElement[] {
+    if (this.readOnly) return [h('div', { class: 'menu-head' }, 'View only')];
     const items: HTMLElement[] = [
       h('button', { onclick: () => void this.newFile(path) }, 'New file'),
       h('button', { onclick: () => void this.newFolder(path) }, 'New folder'),
@@ -298,6 +318,7 @@ export class FileTree {
     target.addEventListener('drop', (e) => {
       e.preventDefault();
       e.stopPropagation();
+      if (this.readOnly) { target.classList.remove(cls); return; }
       depth = 0;
       target.classList.remove(cls);
       document.querySelector('.drop-overlay')?.remove();
@@ -315,6 +336,7 @@ export class FileTree {
 
   /** Files and folders dropped from the desktop, folders walked recursively. */
   async dropFiles(data: DataTransfer, dir: string): Promise<void> {
+    if (this.readOnly) { toast('You have view-only access to this project', 'bad'); return; }
     const out: Array<{ file: File; path: string }> = [];
     const entries = [...data.items].map((item) => item.webkitGetAsEntry?.()).filter(Boolean) as FileSystemEntry[];
     const prefix = dir ? `${dir}/` : '';

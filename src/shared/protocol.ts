@@ -41,6 +41,8 @@ export interface CompileSummary {
   by: string;
   mainFile: string;
   issues: CompileIssue[];
+  /** latexmk found nothing changed since the last compile. */
+  upToDate?: boolean;
 }
 
 export interface CompileIssue {

@@ -1,15 +1,19 @@
 import { execFile } from 'node:child_process';
 import { createReadStream, existsSync } from 'node:fs';
-import { mkdir, readdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { homedir, hostname, networkInterfaces } from 'node:os';
 import { extname, join, resolve } from 'node:path';
 import { WebSocketServer } from 'ws';
-import { cleanPath, cleanProjectName } from '../shared/files.ts';
+import { cleanPath, cleanProjectId, cleanProjectName } from '../shared/files.ts';
 import { BRIDGE_HEADER, type Identity, type ProjectSettings } from '../shared/protocol.ts';
 import { synctex } from './compile.ts';
 import * as gitOps from './git.ts';
 import { resolveIdentity, type AccessConfig } from './identity.ts';
+import {
+  canManage, FOLDER_MARKER, folderVisibleTo, normalizeLogin, normalizeShares, readAccess, readFolderOwner, roleFor,
+  UserDirectory, writeAccess, writeFolderMarker, type ProjectAccess, type ProjectRole,
+} from './access.ts';
 import { Project, type Conn } from './project.ts';
 import { readZip, writeZip } from './zip.ts';
 
@@ -132,54 +136,186 @@ export async function startServer(options: ServerOptions) {
   const rootDir = resolve(options.rootDir);
   await mkdir(rootDir, { recursive: true });
   const projects = new Map<string, Promise<Project>>();
+  const access = options.access ? { admin: normalizeLogin(options.access.admin) } : null;
+  const users = access ? new UserDirectory(join(rootDir, '.texwerk-users.json')) : null;
 
-  function projectDir(name: string): string {
-    const clean = cleanProjectName(name);
-    if (!clean) throw new HttpError(400, 'invalid project name');
-    return join(rootDir, clean);
+  // --------------------------------------------------------- the catalog
+
+  function dirOf(id: string): string {
+    const clean = cleanProjectId(id);
+    if (!clean) throw new HttpError(400, 'invalid project or folder name');
+    return join(rootDir, ...clean.split('/'));
   }
 
-  async function getProject(name: string | null): Promise<Project> {
-    if (!name) throw new HttpError(400, 'missing ?project=');
-    const dir = projectDir(name);
-    let pending = projects.get(name);
+  const isFolderDir = (dir: string) => existsSync(join(dir, FOLDER_MARKER));
+  const isProjectDir = (dir: string) => existsSync(dir) && !isFolderDir(dir);
+
+  async function getProject(id: string | null): Promise<Project> {
+    if (!id) throw new HttpError(400, 'missing ?project=');
+    const clean = cleanProjectId(id);
+    if (!clean) throw new HttpError(400, 'invalid project id');
+    const dir = dirOf(clean);
+    let pending = projects.get(clean);
     if (!pending) {
-      if (!existsSync(dir)) throw new HttpError(404, `no project "${name}"`);
+      if (!isProjectDir(dir)) throw new HttpError(404, `no project "${clean}"`);
       pending = (async () => {
-        const p = new Project(name, dir);
+        const p = new Project(clean, dir);
         await p.open();
-        p.onUnload = () => { if (projects.get(name) === pending) projects.delete(name); };
+        p.onUnload = () => { if (projects.get(clean) === pending) projects.delete(clean); };
         return p;
       })();
-      projects.set(name, pending);
-      pending.catch(() => projects.delete(name));
+      projects.set(clean, pending);
+      pending.catch(() => projects.delete(clean));
     }
     return pending;
   }
 
-  async function closeProject(name: string): Promise<void> {
-    const pending = projects.get(name);
+  async function closeProject(id: string): Promise<void> {
+    const pending = projects.get(id);
     if (!pending) return;
-    projects.delete(name);
+    projects.delete(id);
     await (await pending).close();
   }
 
-  async function listProjects() {
-    const out: Array<{ name: string; modified: number; open: boolean; people: string[] }> = [];
-    for (const e of await readdir(rootDir, { withFileTypes: true })) {
-      if (!e.isDirectory() || e.name.startsWith('.')) continue;
-      const dir = join(rootDir, e.name);
-      let modified = (await stat(dir)).mtimeMs;
-      try { modified = Math.max(modified, (await stat(join(dir, '.texwerk', 'history', 'log.jsonl'))).mtimeMs); } catch { /* none */ }
-      const pending = projects.get(e.name);
-      let people: string[] = [];
-      if (pending) {
-        const p = await pending.catch(() => null);
-        if (p) people = [...new Set([...p.conns].map((c) => (c.bridge ? `${c.identity.name} · agent` : c.identity.name)))];
-      }
-      out.push({ name: e.name, modified, open: Boolean(pending), people });
+  /** The role this identity has on a project; everyone owns everything without --access. */
+  async function roleOf(identity: Identity, id: string): Promise<ProjectRole | null> {
+    if (!access) return 'owner';
+    return roleFor(identity.login, await readAccess(dirOf(id), access), access);
+  }
+
+  async function requireRole(identity: Identity, id: string, need: 'view' | 'edit' | 'manage'): Promise<ProjectRole> {
+    const clean = cleanProjectId(id);
+    if (!clean || !isProjectDir(dirOf(clean))) throw new HttpError(404, `no project "${id}"`);
+    const role = await roleOf(identity, clean);
+    if (!role) throw new HttpError(403, 'you do not have access to this project');
+    if (need === 'edit' && role === 'view') throw new HttpError(403, 'you have view-only access to this project');
+    if (need === 'manage' && access && !canManage(identity.login, await readAccess(dirOf(clean), access), access)) {
+      throw new HttpError(403, 'only the owner can do that');
     }
-    return out.sort((a, b) => b.modified - a.modified);
+    return role;
+  }
+
+  interface ProjectEntry {
+    id: string;
+    name: string;
+    folder: string;
+    files: number;
+    editedAt: number;
+    editors: number;
+    people: string[];
+    owner?: string;
+    visibility?: 'public' | 'private';
+    publicRole?: 'edit' | 'view';
+    role: ProjectRole;
+    canManage: boolean;
+    sharedWithMe?: boolean;
+  }
+
+  interface FolderEntry {
+    path: string;
+    name: string;
+    parent: string;
+    projects: number;
+    owner?: string;
+    canManage: boolean;
+  }
+
+  async function countFiles(dir: string): Promise<number> {
+    let n = 0;
+    const walk = async (d: string, top: boolean) => {
+      let entries;
+      try { entries = await readdir(d, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        if (top && (e.name === '.git' || e.name === '.texwerk')) continue;
+        if (e.isDirectory()) await walk(join(d, e.name), false);
+        else if (e.isFile()) n++;
+      }
+    };
+    await walk(dir, true);
+    return n;
+  }
+
+  /** Every project and folder this identity may see. */
+  async function catalog(identity: Identity): Promise<{ projects: ProjectEntry[]; folders: FolderEntry[] }> {
+    const outProjects: ProjectEntry[] = [];
+    const outFolders: FolderEntry[] = [];
+    const walk = async (dir: string, rel: string): Promise<number> => {
+      let accessible = 0;
+      let entries;
+      try { entries = await readdir(dir, { withFileTypes: true }); } catch { return 0; }
+      for (const e of entries) {
+        if (!e.isDirectory() || e.name.startsWith('.')) continue;
+        const childDir = join(dir, e.name);
+        const id = rel ? `${rel}/${e.name}` : e.name;
+        if (!cleanProjectId(id)) continue;
+        if (isFolderDir(childDir)) {
+          const inside = await walk(childDir, id);
+          const owner = access ? await readFolderOwner(childDir, access) : undefined;
+          const visible = !access || folderVisibleTo(identity.login, { owner: owner!, accessibleProjects: inside }, access);
+          if (visible) {
+            outFolders.push({
+              path: id, name: e.name, parent: rel, projects: inside, owner,
+              canManage: !access || identity.login === access.admin || owner === identity.login,
+            });
+          }
+          accessible += inside;
+          continue;
+        }
+        const projectAccess = access ? await readAccess(childDir, access) : null;
+        const role = access ? roleFor(identity.login, projectAccess!, access) : 'owner';
+        if (!role) continue;
+        accessible += 1;
+        let editedAt = (await stat(childDir)).mtimeMs;
+        try { editedAt = Math.max(editedAt, (await stat(join(childDir, '.texwerk', 'history', 'log.jsonl'))).mtimeMs); } catch { /* never edited here */ }
+        const open = projects.get(id);
+        const p = open ? await open.catch(() => null) : null;
+        const people = p ? [...new Set([...p.conns].map((c) => (c.bridge ? `${c.identity.name} · agent` : c.identity.name)))] : [];
+        outProjects.push({
+          id, name: e.name, folder: rel,
+          files: p ? p.allFiles().length : await countFiles(childDir),
+          editedAt, editors: people.length, people,
+          owner: projectAccess?.owner,
+          visibility: projectAccess?.visibility,
+          publicRole: projectAccess?.publicRole,
+          role,
+          canManage: !access || canManage(identity.login, projectAccess!, access),
+          sharedWithMe: projectAccess?.sharedWith.some((s) => s.login === identity.login),
+        });
+      }
+      return accessible;
+    };
+    await walk(rootDir, '');
+    outProjects.sort((a, b) => b.editedAt - a.editedAt);
+    outFolders.sort((a, b) => a.name.localeCompare(b.name));
+    return { projects: outProjects, folders: outFolders };
+  }
+
+  /** Who may create things in `folder`: anyone who can see it (it is theirs, or holds their work). */
+  async function checkFolder(identity: Identity, folder: string): Promise<string> {
+    if (!folder) return '';
+    const clean = cleanProjectId(folder);
+    if (!clean || !isFolderDir(dirOf(clean))) throw new HttpError(404, `no folder "${folder}"`);
+    if (access) {
+      const { folders } = await catalog(identity);
+      if (!folders.some((f) => f.path === clean)) throw new HttpError(404, `no folder "${folder}"`);
+    }
+    return clean;
+  }
+
+  /** A new project's id in `folder`, refusing names that are taken. */
+  async function newProjectId(identity: Identity, name: unknown, folder: unknown): Promise<string> {
+    const clean = cleanProjectName(String(name ?? ''));
+    if (!clean) throw new HttpError(400, 'invalid project name');
+    const parent = await checkFolder(identity, String(folder ?? ''));
+    const id = parent ? `${parent}/${clean}` : clean;
+    if (existsSync(dirOf(id))) throw new HttpError(409, `"${clean}" already exists here`);
+    return id;
+  }
+
+  /** New and imported projects start private to their creator. */
+  async function claim(identity: Identity, id: string): Promise<void> {
+    if (!access) return;
+    await writeAccess(dirOf(id), { owner: identity.login, visibility: 'private', sharedWith: [], publicRole: 'view' });
   }
 
   function identityOf(request: IncomingMessage, url: URL): Identity {
@@ -197,7 +333,9 @@ export async function startServer(options: ServerOptions) {
     const path = decodeURIComponent(url.pathname);
     const method = request.method ?? 'GET';
     const identity = identityOf(request, url);
-    const who = request.headers[BRIDGE_HEADER] === '1' ? `${identity.name} · agent` : identity.name;
+    if (users) void users.note(identity);
+    const bridge = request.headers[BRIDGE_HEADER] === '1';
+    const who = bridge ? `${identity.name} · agent` : identity.name;
     const projectParam = url.searchParams.get('project');
 
     // ------------------------------------------------------------ static
@@ -213,11 +351,13 @@ export async function startServer(options: ServerOptions) {
     }
 
     // ---------------------------------------------------------- raw files
-    // /raw/<project>/<path>: current bytes of a project file.
-    const raw = /^\/raw\/([^/]+)\/(.+)$/.exec(path);
+    // /raw/<project id, URI-encoded as one segment>/<path>: current bytes of a file.
+    const raw = /^\/raw\/([^/]+)\/(.+)$/.exec(url.pathname);
     if (raw && method === 'GET') {
-      const project = await getProject(raw[1]);
-      const rel = cleanPath(raw[2]);
+      const id = decodeURIComponent(raw[1]);
+      await requireRole(identity, id, 'view');
+      const project = await getProject(id);
+      const rel = cleanPath(decodeURIComponent(raw[2]));
       if (!rel) throw new HttpError(400, 'bad path');
       const ytext = project.texts.get(rel);
       const download = url.searchParams.has('download') ? rel.split('/').pop() : undefined;
@@ -235,33 +375,40 @@ export async function startServer(options: ServerOptions) {
       if (!real.startsWith(`${await realpath(project.dir)}/`)) throw new HttpError(403, 'outside the project');
       return sendFile(request, response, real, { download });
     }
-    // /pdf/<project>/<name>.pdf: the latest compiled PDF.
-    const pdf = /^\/pdf\/([^/]+)\/[^/]*$/.exec(path);
+    // /pdf/<project id>/<name>.pdf: the latest compiled PDF.
+    const pdf = /^\/pdf\/([^/]+)\/[^/]*$/.exec(url.pathname);
     if (pdf && method === 'GET') {
-      const project = await getProject(pdf[1]);
+      const id = decodeURIComponent(pdf[1]);
+      await requireRole(identity, id, 'view');
+      const project = await getProject(id);
       if (!project.lastPdf) throw new HttpError(404, 'not compiled yet');
-      const download = url.searchParams.has('download') ? `${project.name}.pdf` : undefined;
+      const download = url.searchParams.has('download') ? `${project.name.split('/').pop()}.pdf` : undefined;
       return sendFile(request, response, project.lastPdf, { download, noStore: true });
     }
 
     // ---------------------------------------------------------------- api
-    if (path === '/api/me') return json(response, 200, { you: identity, access: Boolean(options.access), host: hostname() });
+    if (path === '/api/me') {
+      return json(response, 200, { you: identity, access: Boolean(access), admin: !access || identity.login === access.admin, host: hostname() });
+    }
 
-    if (path === '/api/projects' && method === 'GET') return json(response, 200, { projects: await listProjects() });
+    if (path === '/api/projects' && method === 'GET') return json(response, 200, await catalog(identity));
+
+    if (path === '/api/users' && method === 'GET') return json(response, 200, users ? await users.all() : []);
 
     if (path === '/api/projects' && method === 'POST') {
-      const body = await readJson<{ name: string; blank?: boolean }>(request);
-      const dir = projectDir(body.name);
-      if (existsSync(dir)) throw new HttpError(409, 'a project with that name exists');
+      const body = await readJson<{ name: string; folder?: string; blank?: boolean }>(request);
+      const id = await newProjectId(identity, body.name, body.folder);
+      const dir = dirOf(id);
       await mkdir(dir);
       if (!body.blank) await writeFile(join(dir, 'main.tex'), TEMPLATE);
       await gitOps.ensureRepo(dir);
-      return json(response, 200, { name: cleanProjectName(body.name) });
+      await claim(identity, id);
+      return json(response, 200, { id });
     }
 
     if (path === '/api/projects/import' && method === 'POST') {
-      const dir = projectDir(url.searchParams.get('name') ?? '');
-      if (existsSync(dir)) throw new HttpError(409, 'a project with that name exists');
+      const id = await newProjectId(identity, url.searchParams.get('name'), url.searchParams.get('folder'));
+      const dir = dirOf(id);
       const entries = readZip(await readBody(request));
       // An archive of a single folder is unwrapped: import its contents.
       const names = entries.map((e) => e.name.replace(/\\/g, '/'));
@@ -275,33 +422,127 @@ export async function startServer(options: ServerOptions) {
         await writeFile(join(dir, rel), e.data);
       }
       await gitOps.ensureRepo(dir);
-      return json(response, 200, { name: cleanProjectName(url.searchParams.get('name') ?? '') });
+      await claim(identity, id);
+      return json(response, 200, { id });
     }
 
     if (path === '/api/projects/clone' && method === 'POST') {
-      const body = await readJson<{ url: string; name: string }>(request);
-      const dir = projectDir(body.name);
-      if (existsSync(dir)) throw new HttpError(409, 'a project with that name exists');
+      const body = await readJson<{ url: string; name: string; folder?: string }>(request);
+      const id = await newProjectId(identity, body.name, body.folder);
       if (!/^(https?:\/\/|git@|ssh:\/\/)/.test(body.url)) throw new HttpError(400, 'use an https:// or ssh git URL');
-      const r = await gitOps.clone(rootDir, body.url, cleanProjectName(body.name)!);
+      const parent = id.includes('/') ? dirOf(id.slice(0, id.lastIndexOf('/'))) : rootDir;
+      const r = await gitOps.clone(parent, body.url, id.split('/').pop()!);
       if (!r.ok) return json(response, 400, { error: r.output });
-      return json(response, 200, { name: cleanProjectName(body.name), output: r.output });
+      await claim(identity, id);
+      return json(response, 200, { id, output: r.output });
     }
 
+    // Renaming or moving changes the id, so the project must not be open.
+    const relocate = async (from: string, to: string) => {
+      if (existsSync(dirOf(to))) throw new HttpError(409, `"${to.split('/').pop()}" already exists there`);
+      const open = projects.get(from);
+      if (open && (await open.catch(() => null))?.conns.size) {
+        throw new HttpError(409, 'someone has this project open; it can be renamed or moved once everyone has closed it');
+      }
+      await closeProject(from);
+      await rename(dirOf(from), dirOf(to));
+    };
+
     if (path === '/api/projects/rename' && method === 'POST') {
-      const body = await readJson<{ from: string; to: string }>(request);
-      const from = projectDir(body.from);
-      const to = projectDir(body.to);
-      if (!existsSync(from)) throw new HttpError(404, 'no such project');
-      if (existsSync(to)) throw new HttpError(409, 'a project with that name exists');
-      const open = projects.get(body.from);
-      if (open && (await open).conns.size) throw new HttpError(409, 'close the project everywhere before renaming it');
-      await closeProject(body.from);
-      await rename(from, to);
-      return json(response, 200, { name: cleanProjectName(body.to) });
+      const id = cleanProjectId(projectParam ?? '') ?? '';
+      await requireRole(identity, id, 'manage');
+      const name = cleanProjectName(url.searchParams.get('name') ?? '');
+      if (!name) throw new HttpError(400, 'invalid name');
+      const to = id.includes('/') ? `${id.slice(0, id.lastIndexOf('/'))}/${name}` : name;
+      if (to !== id) await relocate(id, to);
+      return json(response, 200, { id: to });
+    }
+
+    if (path === '/api/projects/move' && method === 'POST') {
+      const id = cleanProjectId(projectParam ?? '') ?? '';
+      await requireRole(identity, id, 'manage');
+      const folder = await checkFolder(identity, url.searchParams.get('folder') ?? '');
+      const name = id.split('/').pop()!;
+      const to = folder ? `${folder}/${name}` : name;
+      if (to !== id) await relocate(id, to);
+      return json(response, 200, { id: to });
+    }
+
+    if (path === '/api/folders' && method === 'POST') {
+      const target = cleanProjectId(url.searchParams.get('path') ?? '');
+      if (!target) throw new HttpError(400, 'invalid folder name');
+      await checkFolder(identity, target.includes('/') ? target.slice(0, target.lastIndexOf('/')) : '');
+      if (existsSync(dirOf(target))) throw new HttpError(409, 'that name is taken');
+      await mkdir(dirOf(target));
+      await writeFolderMarker(dirOf(target), identity.login);
+      return json(response, 200, { path: target });
+    }
+
+    const manageFolder = async (folderPath: string) => {
+      const clean = await checkFolder(identity, folderPath);
+      if (!clean) throw new HttpError(400, 'missing folder');
+      if (access && identity.login !== access.admin && (await readFolderOwner(dirOf(clean), access)) !== identity.login) {
+        throw new HttpError(403, 'only the folder\'s creator can do that');
+      }
+      return clean;
+    };
+
+    if (path === '/api/folders/rename' && method === 'POST') {
+      const folder = await manageFolder(url.searchParams.get('path') ?? '');
+      const name = cleanProjectName(url.searchParams.get('name') ?? '');
+      if (!name) throw new HttpError(400, 'invalid name');
+      const to = folder.includes('/') ? `${folder.slice(0, folder.lastIndexOf('/'))}/${name}` : name;
+      if (existsSync(dirOf(to))) throw new HttpError(409, 'that name is taken');
+      for (const id of projects.keys()) {
+        if (id.startsWith(`${folder}/`) && (await projects.get(id)!.catch(() => null))?.conns.size) {
+          throw new HttpError(409, 'a project in this folder is open; rename it once everyone has closed it');
+        }
+      }
+      for (const id of [...projects.keys()]) if (id.startsWith(`${folder}/`)) await closeProject(id);
+      await rename(dirOf(folder), dirOf(to));
+      return json(response, 200, { path: to });
+    }
+
+    if (path === '/api/folders' && method === 'DELETE') {
+      const folder = await manageFolder(url.searchParams.get('path') ?? '');
+      const inside = (await readdir(dirOf(folder))).filter((n) => n !== FOLDER_MARKER);
+      if (inside.length) throw new HttpError(409, 'only an empty folder can be deleted');
+      await rm(dirOf(folder), { recursive: true });
+      return json(response, 200, { ok: true });
+    }
+
+    if (path === '/api/access') {
+      const id = cleanProjectId(projectParam ?? '') ?? '';
+      const role = await requireRole(identity, id, 'view');
+      if (!access) return json(response, 200, { enabled: false });
+      const current = await readAccess(dirOf(id), access);
+      const manage = canManage(identity.login, current, access);
+      if (method === 'GET') return json(response, 200, { enabled: true, ...current, canManage: manage, role });
+      if (method === 'PUT') {
+        if (!manage) throw new HttpError(403, 'only the owner can change who has access');
+        const body = await readJson<Partial<ProjectAccess>>(request);
+        const next: ProjectAccess = {
+          owner: current.owner,
+          visibility: body.visibility === 'public' ? 'public' : 'private',
+          publicRole: body.publicRole === 'edit' ? 'edit' : 'view',
+          sharedWith: normalizeShares(body.sharedWith).filter((s) => s.login !== current.owner),
+        };
+        await writeAccess(dirOf(id), next);
+        // People who just lost access are disconnected; their role is re-read on reconnect.
+        const open = projects.get(id);
+        const p = open ? await open.catch(() => null) : null;
+        if (p) {
+          for (const c of p.conns) {
+            const nowRole = roleFor(c.identity.login, next, access);
+            if (!nowRole || (nowRole === 'view') !== c.readOnly) c.ws.close(4401, 'access changed');
+          }
+        }
+        return json(response, 200, { ok: true });
+      }
     }
 
     if (path === '/api/ssh-key') {
+      if (access && identity.login !== access.admin) throw new HttpError(403, 'only the admin manages the server key');
       const pub = `${sshKeyPath()}.pub`;
       if (method === 'POST' && !existsSync(pub)) {
         await mkdir(join(homedir(), '.ssh'), { recursive: true, mode: 0o700 });
@@ -310,8 +551,12 @@ export async function startServer(options: ServerOptions) {
       return json(response, 200, { publicKey: existsSync(pub) ? (await readFile(pub, 'utf8')).trim() : null });
     }
 
-    // Everything below is scoped to one project.
+    // Everything below is scoped to one project. Reading needs any role;
+    // anything that changes the project needs edit.
+    const role = await requireRole(identity, projectParam ?? '', 'view');
     const project = await getProject(projectParam);
+    const reads = method === 'GET' || path === '/api/compile' || path === '/api/synctex/edit' || path === '/api/synctex/view';
+    if (!reads && role === 'view') throw new HttpError(403, 'you have view-only access to this project');
     const bodyPath = (p: unknown) => {
       const clean = cleanPath(String(p ?? ''));
       if (!clean) throw new HttpError(400, 'bad path');
@@ -339,7 +584,7 @@ export async function startServer(options: ServerOptions) {
     }
 
     if (path === '/api/compile' && method === 'POST') {
-      const done = project.requestCompile(who);
+      const done = project.requestCompile(who, url.searchParams.get('clean') === '1');
       if (url.searchParams.get('wait') === '1') {
         await done;
         // A compile queued behind a running one: wait for that too.
@@ -521,9 +766,10 @@ export async function startServer(options: ServerOptions) {
         const bytes = new Uint8Array(data as Buffer);
         if (deliver) deliver(bytes); else early.push(bytes);
       });
-      getProject(name).then((project) => {
+      const bridge = url.searchParams.get('bridge') === '1';
+      requireRole(identity, name ?? '', bridge ? 'edit' : 'view').then(async (role) => [await getProject(name), role] as const).then(([project, role]) => {
         if (ws.readyState !== ws.OPEN) return;
-        const conn: Conn = { ws, identity, bridge: url.searchParams.get('bridge') === '1', awarenessIds: new Set() };
+        const conn: Conn = { ws, identity, bridge, readOnly: role === 'view', awarenessIds: new Set() };
         deliver = (bytes) => {
           try {
             project.handleMessage(conn, bytes);
@@ -535,7 +781,8 @@ export async function startServer(options: ServerOptions) {
         project.addConn(conn);
         for (const bytes of early.splice(0)) deliver(bytes);
       }, (err: unknown) => {
-        ws.close(err instanceof HttpError && err.status === 404 ? 4404 : 1011, (err as Error).message.slice(0, 120));
+        const status = err instanceof HttpError ? err.status : 500;
+        ws.close(status === 404 ? 4404 : status === 403 ? 4403 : 1011, (err as Error).message.slice(0, 120));
       });
     });
   });

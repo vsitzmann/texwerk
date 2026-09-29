@@ -82,6 +82,7 @@ export interface CodeEditorOptions {
   onCursor: (line: number, col: number) => void;
   onCompile: () => void;
   onSyncToPdf: () => void;
+  readOnly?: boolean;
 }
 
 export class CodeEditor {
@@ -115,6 +116,8 @@ export class CodeEditor {
         highlightSelectionMatches(),
         syntaxHighlighting(tokyo),
         EditorView.lineWrapping,
+        EditorState.readOnly.of(Boolean(opts.readOnly)),
+        EditorView.editable.of(!opts.readOnly),
         flashField,
         ...language,
         keymap.of([
