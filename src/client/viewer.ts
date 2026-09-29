@@ -50,6 +50,67 @@ class PdfView {
   onPinClick: ((id: string, rect: DOMRect) => void) | null = null;
   private pins: PdfPin[] = [];
 
+  private textCache = new Map<number, Promise<Array<{ str: string; top: number }>>>();
+
+  /** The page's text runs with their top edge in PDF points from the page top. */
+  private pageText(pageNumber: number): Promise<Array<{ str: string; top: number }>> {
+    let cached = this.textCache.get(pageNumber);
+    if (!cached) {
+      const p = this.pages[pageNumber - 1];
+      cached = p ? p.page.getTextContent().then((tc) => tc.items.flatMap((item) => {
+        if (!('str' in item) || !item.str) return [];
+        const size = Math.hypot(item.transform[2], item.transform[3]) || 10;
+        return [{ str: item.str, top: p.height - item.transform[5] - size * 0.8 }];
+      })) : Promise.resolve([]);
+      this.textCache.set(pageNumber, cached);
+    }
+    return cached;
+  }
+
+  /**
+   * Where exactly `quote` sits inside the block SyncTeX gave for its source
+   * line: search the page's own text for its first words and take the match
+   * nearest the block, else the block's top. Null only when the quote has no
+   * printed words at all (a TeX comment, a command, the preamble).
+   */
+  async locate(pageNumber: number, top: number, bottom: number, quote: string): Promise<number | null> {
+    const words = quote
+      .replace(/(^|[^\\])%.*$/gm, '$1')
+      .replace(/\$[^$]*\$/g, ' ')
+      .replace(/\\[a-zA-Z@]+\*?/g, ' ')
+      .replace(/[{}\[\]~\\^_&#]/g, ' ')
+      .split(/\s+/)
+      .map((w) => w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ''))
+      .filter((w) => w.length > 1);
+    if (!words.length) return null;
+    const items = await this.pageText(pageNumber);
+    // One string for the page, remembering which run each character came from.
+    let text = '';
+    const owner: number[] = [];
+    items.forEach((item, i) => {
+      const piece = `${item.str} `;
+      text += piece;
+      for (let k = 0; k < piece.length; k++) owner.push(i);
+    });
+    const esc = (w: string) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    for (let n = Math.min(4, words.length); n >= 1; n--) {
+      if (n === 1 && words[0].length < 4) break;
+      // Words may be hyphenated across lines or split between runs.
+      const pattern = new RegExp(words.slice(0, n).map((w) => w.split('').map(esc).join('(?:-?\\s*)?')).join('[\\s\\-]+'), 'giu');
+      let best: number | null = null;
+      for (const m of text.matchAll(pattern)) {
+        const y = items[owner[m.index!]].top;
+        const distance = y < top - 12 ? top - 12 - y : y > bottom + 4 ? y - bottom - 4 : 0;
+        if (distance > 40) continue;
+        if (best === null || Math.abs(y - (top + bottom) / 2) < Math.abs(best - (top + bottom) / 2)) best = y;
+      }
+      if (best !== null) return best;
+    }
+    // Printed words we could not find (odd markup, a ligature): the
+    // paragraph's own position is close enough.
+    return top;
+  }
+
   /** Pins in the right margin of each page; several on one spot stack. */
   setPins(pins: PdfPin[]): void {
     this.pins = pins;
@@ -113,6 +174,7 @@ class PdfView {
     this.observer.disconnect();
     this.doc = doc;
     this.task = task;
+    this.textCache.clear();
     this.pages = pages;
     if (this.fitWidth) this.scale = this.fitScale();
     this.layout();
@@ -256,8 +318,20 @@ export class Viewer {
     this.render();
   }
 
+  private pinsNow: PdfPin[] = [];
+
   setPins(pins: PdfPin[]): void {
+    this.pinsNow = pins;
     this.pdf.setPins(pins);
+  }
+
+  /** Where each thread's pin is, for the annotated PDF download. */
+  pinPositions(): Record<string, { page: number; y: number }> {
+    return Object.fromEntries(this.pinsNow.map((p) => [p.id, { page: p.page, y: p.y }]));
+  }
+
+  locate(page: number, top: number, bottom: number, quote: string): Promise<number | null> {
+    return this.pdf.locate(page, top, bottom, quote);
   }
 
   get pdfLoaded(): boolean {

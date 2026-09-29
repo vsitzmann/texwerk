@@ -142,14 +142,19 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
     if (!viewer.pdfLoaded || !threads.length) { viewer.setPins([]); return; }
     const request = ++pinsRequest;
     try {
-      const r = await api<{ results: Array<{ page: number; y: number } | null> }>('POST', `/api/synctex/lines?project=${encodeURIComponent(project)}`,
+      const r = await api<{ results: Array<{ page: number; top: number; bottom: number } | null> }>('POST', `/api/synctex/lines?project=${encodeURIComponent(project)}`,
         { items: threads.map((t) => ({ file: t.path, line: t.line })) });
       if (request !== pinsRequest) return;
       const pins: PdfPin[] = [];
-      threads.forEach((t, i) => {
+      for (const [i, t] of threads.entries()) {
         const pos = r.results[i];
-        if (pos) pins.push({ id: t.id, page: pos.page, y: pos.y, color: colorFor(t.login.replace(/:agent$/, '')), title: `${t.messages[0]?.author}: ${t.messages[0]?.text ?? ''}`.slice(0, 200) });
-      });
+        if (!pos) continue;
+        // SyncTeX knows the paragraph; the PDF's own text says where the words are.
+        const y = await viewer.locate(pos.page, pos.top, pos.bottom, t.quote);
+        if (y === null) continue;
+        pins.push({ id: t.id, page: pos.page, y: y + 6, color: colorFor(t.login.replace(/:agent$/, '')), title: `${t.messages[0]?.author}: ${t.messages[0]?.text ?? ''}`.slice(0, 200) });
+      }
+      if (request !== pinsRequest) return;
       viewer.setPins(pins);
     } catch { /* no synctex: no pins */ }
   }
@@ -607,9 +612,31 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
       h('button', { onclick: () => go(`/api/zip?project=${encodeURIComponent(project)}&comments=1`) }, 'Project as .zip + comments'),
       h('div', { class: 'menu-sep' }),
       h('button', { disabled: !compile?.hasPdf, onclick: () => go(`/pdf/${encodeURIComponent(project)}/output.pdf?download=1`) }, 'Compiled PDF'),
-      h('button', { disabled: !compile?.hasPdf, title: 'The PDF with each open comment as a sticky note, for any PDF reader', onclick: () => go(`/pdf/${encodeURIComponent(project)}/output.pdf?comments=1`) }, 'Compiled PDF with comments'),
+      h('button', { disabled: !compile?.hasPdf, title: 'The PDF with each open comment as a sticky note, for any PDF reader', onclick: () => void downloadAnnotated() }, 'Compiled PDF with comments'),
     ]);
   });
+
+  async function downloadAnnotated(): Promise<void> {
+    await refreshPins();
+    const timer = window.setTimeout(() => setStatus('Adding comments to the PDF…'), 500);
+    try {
+      const r = await fetch(withName(`/pdf/${encodeURIComponent(project)}/output.pdf?comments=1`), {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ positions: viewer.pinPositions() }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? `${r.status}`);
+      const url = URL.createObjectURL(await r.blob());
+      const a = h('a', { href: url, download: `${projectName} (comments).pdf` });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (err) {
+      toast(`Could not build the PDF: ${(err as Error).message}`, 'bad');
+    } finally {
+      window.clearTimeout(timer);
+      setStatus(null);
+    }
+  }
 
   // ------------------------------------------------------------ window-level drop
   let dragDepth = 0;

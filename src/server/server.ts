@@ -379,7 +379,7 @@ export async function startServer(options: ServerOptions) {
     }
     // /pdf/<project id>/<name>.pdf: the latest compiled PDF.
     const pdf = /^\/pdf\/([^/]+)\/[^/]*$/.exec(url.pathname);
-    if (pdf && method === 'GET') {
+    if (pdf && (method === 'GET' || (method === 'POST' && url.searchParams.get('comments') === '1'))) {
       const id = decodeURIComponent(pdf[1]);
       await requireRole(identity, id, 'view');
       const project = await getProject(id);
@@ -387,8 +387,18 @@ export async function startServer(options: ServerOptions) {
       const base = project.name.split('/').pop()!;
       if (url.searchParams.get('comments') === '1') {
         const threads = sortThreads(allThreads(project.doc)).filter((t) => !t.resolved && t.line !== null);
+        // The browser knows exactly where each quote is printed (it searched
+        // the PDF text); fall back to SyncTeX's paragraph for the rest.
+        const exact = method === 'POST' ? (await readJson<{ positions?: Record<string, { page: number; y: number }> }>(request)).positions ?? {} : {};
         const positions = [];
-        for (const t of threads) positions.push(await pdfPosition(project, t.path, t.line!));
+        for (const t of threads) {
+          const e = exact[t.id];
+          // Same pins as on screen: a thread the browser could not place is left out.
+          if (method === 'POST' && !e) { positions.push(null); continue; }
+          positions.push(e && Number.isFinite(e.page) && Number.isFinite(e.y)
+            ? { page: e.page, x: 0, y: e.y, top: e.y, bottom: e.y }
+            : await pdfPosition(project, t.path, t.line!));
+        }
         const annotated = await annotatePdf(await readFile(project.lastPdf), threads, positions);
         response.writeHead(200, {
           'content-type': 'application/pdf', 'cache-control': 'no-store',
