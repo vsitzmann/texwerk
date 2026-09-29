@@ -541,11 +541,11 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
         await load();
       };
       const load = async () => {
-        const { status } = await api<{ status: { branch: string; remote: string; ahead: number | null; behind: number | null; dirty: boolean } }>('GET', `/api/git?project=${encodeURIComponent(project)}`);
+        const { status } = await api<{ status: { branch: string; remote: string; ahead: number | null; behind: number | null; dirty: boolean; hasCommits: boolean } }>('GET', `/api/git?project=${encodeURIComponent(project)}`);
         if (document.activeElement !== remote) remote.value = status.remote;
         info.replaceChildren(
           h('span', {}, 'branch'), h('b', {}, status.branch),
-          h('span', {}, 'since label'), h('b', {}, status.dirty ? 'unlabelled changes' : 'nothing new'),
+          h('span', {}, 'since label'), h('b', {}, !status.hasCommits ? 'no labels yet — label a version to make the first commit' : status.dirty ? 'unlabelled changes' : 'nothing new'),
           h('span', {}, 'remote'), h('b', {}, status.ahead === null ? (status.remote ? 'not pushed yet' : 'none')
             : `${status.ahead} to push, ${status.behind} to pull`));
       };

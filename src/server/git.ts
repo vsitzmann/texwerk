@@ -83,16 +83,27 @@ export async function labels(dir: string): Promise<GitLabel[]> {
   return out;
 }
 
+/**
+ * The checked-out branch — also in a repository with no commits yet, where
+ * `rev-parse HEAD` fails (and its error must not become the branch name).
+ */
+async function currentBranch(dir: string): Promise<string> {
+  const r = await git(dir, ['symbolic-ref', '--short', 'HEAD']);
+  return r.ok && r.output ? r.output : 'main';
+}
+
 export interface GitStatus {
   branch: string;
   remote: string;
   ahead: number | null;
   behind: number | null;
   dirty: boolean;
+  /** False until the first label. */
+  hasCommits: boolean;
 }
 
 export async function status(dir: string): Promise<GitStatus> {
-  const branch = (await git(dir, ['rev-parse', '--abbrev-ref', 'HEAD'])).output || 'main';
+  const branch = await currentBranch(dir);
   const remote = (await git(dir, ['remote', 'get-url', 'origin'])).ok
     ? (await git(dir, ['remote', 'get-url', 'origin'])).output : '';
   let ahead: number | null = null;
@@ -104,7 +115,8 @@ export async function status(dir: string): Promise<GitStatus> {
     behind = b;
   }
   const dirty = (await git(dir, ['status', '--porcelain'])).output.length > 0;
-  return { branch, remote, ahead, behind, dirty };
+  const hasCommits = (await git(dir, ['rev-parse', '--verify', '-q', 'HEAD'])).ok;
+  return { branch, remote, ahead, behind, dirty, hasCommits };
 }
 
 export async function setRemote(dir: string, url: string): Promise<GitResult> {
@@ -114,12 +126,16 @@ export async function setRemote(dir: string, url: string): Promise<GitResult> {
 }
 
 export async function push(dir: string): Promise<GitResult> {
-  const branch = (await git(dir, ['rev-parse', '--abbrev-ref', 'HEAD'])).output || 'main';
+  if (!(await git(dir, ['rev-parse', '--verify', '-q', 'HEAD'])).ok) {
+    return { ok: false, output: 'Nothing to push yet: label a version first — each label is a commit.' };
+  }
+  if (!(await git(dir, ['remote', 'get-url', 'origin'])).ok) return { ok: false, output: 'Set a remote first.' };
+  const branch = await currentBranch(dir);
   return git(dir, ['push', '-u', 'origin', branch], 120_000);
 }
 
 export async function pull(dir: string, name: string, email: string): Promise<GitResult> {
-  const branch = (await git(dir, ['rev-parse', '--abbrev-ref', 'HEAD'])).output || 'main';
+  const branch = await currentBranch(dir);
   const fetch = await git(dir, ['fetch', 'origin'], 120_000);
   if (!fetch.ok) return fetch;
   // Unlabelled work in progress is committed first so a pull never discards it.
