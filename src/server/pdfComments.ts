@@ -64,8 +64,9 @@ export async function annotatePdf(pdf: Buffer, threads: CommentThread[], positio
     const page = pos ? pages[pos.page - 1] : undefined;
     if (!pos || !page) return;
     const { width, height } = page.getSize();
-    const x = width - 34;
-    const y = height - pos.y;
+    // On the commented words when we know where they are, else in the margin.
+    const x = pos.x > 0 ? Math.min(width - 20, Math.max(2, pos.x - 9)) : width - 34;
+    const y = height - pos.y + (pos.x > 0 ? 14 : 0);
     const conversation = thread.messages.map((m) => `${m.author}: ${m.text}`).join('\n\n');
     const annot = doc.context.register(doc.context.obj({
       Type: 'Annot',

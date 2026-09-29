@@ -36,6 +36,7 @@
     "@types/ws": "^8.18.1",
     "codemirror": "^6.0.2",
     "pdfjs-dist": "^6.3.289",
+    "playwright-core": "^1.62.1",
     "typescript": "^7.0.2",
     "vite": "^8.2.2",
     "y-codemirror.next": "^0.3.6"

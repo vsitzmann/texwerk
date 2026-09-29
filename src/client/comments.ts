@@ -50,7 +50,7 @@ export class Comments {
       textQueued = window.setTimeout(() => { if (this.threads.length) this.refresh(); }, 400);
     });
     document.addEventListener('mousedown', (e) => {
-      if (this.popover && !this.popover.contains(e.target as Node) && !(e.target as HTMLElement).closest('.cm-comment-marker, .pdf-pin, .cm-comment-range, .cm-comment-tip')) this.closePopover();
+      if (this.popover && !this.popover.contains(e.target as Node) && !(e.target as HTMLElement).closest('.cm-comment-marker, .pdf-pin, .pdf-comment-mark, .cm-comment-range, .cm-comment-tip')) this.closePopover();
     });
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && this.popover && !document.querySelector('.backdrop')) this.closePopover(); });
     // After the constructor returns: onChange may use the instance.

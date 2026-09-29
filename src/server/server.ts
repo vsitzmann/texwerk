@@ -389,14 +389,14 @@ export async function startServer(options: ServerOptions) {
         const threads = sortThreads(allThreads(project.doc)).filter((t) => !t.resolved && t.line !== null);
         // The browser knows exactly where each quote is printed (it searched
         // the PDF text); fall back to SyncTeX's paragraph for the rest.
-        const exact = method === 'POST' ? (await readJson<{ positions?: Record<string, { page: number; y: number }> }>(request)).positions ?? {} : {};
+        const exact = method === 'POST' ? (await readJson<{ positions?: Record<string, { page: number; x: number; y: number }> }>(request)).positions ?? {} : {};
         const positions = [];
         for (const t of threads) {
           const e = exact[t.id];
           // Same pins as on screen: a thread the browser could not place is left out.
           if (method === 'POST' && !e) { positions.push(null); continue; }
           positions.push(e && Number.isFinite(e.page) && Number.isFinite(e.y)
-            ? { page: e.page, x: 0, y: e.y, top: e.y, bottom: e.y }
+            ? { page: e.page, x: Number(e.x) || 0, y: e.y, top: e.y, bottom: e.y }
             : await pdfPosition(project, t.path, t.line!));
         }
         const annotated = await annotatePdf(await readFile(project.lastPdf), threads, positions);

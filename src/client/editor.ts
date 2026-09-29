@@ -142,7 +142,7 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
     if (!viewer.pdfLoaded || !threads.length) { viewer.setPins([]); return; }
     const request = ++pinsRequest;
     try {
-      const r = await api<{ results: Array<{ page: number; top: number; bottom: number } | null> }>('POST', `/api/synctex/lines?project=${encodeURIComponent(project)}`,
+      const r = await api<{ results: Array<{ page: number; x: number; top: number; bottom: number } | null> }>('POST', `/api/synctex/lines?project=${encodeURIComponent(project)}`,
         { items: threads.map((t) => ({ file: t.path, line: t.line })) });
       if (request !== pinsRequest) return;
       const pins: PdfPin[] = [];
@@ -150,9 +150,9 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
         const pos = r.results[i];
         if (!pos) continue;
         // SyncTeX knows the paragraph; the PDF's own text says where the words are.
-        const y = await viewer.locate(pos.page, pos.top, pos.bottom, t.quote);
-        if (y === null) continue;
-        pins.push({ id: t.id, page: pos.page, y: y + 6, color: colorFor(t.login.replace(/:agent$/, '')), title: `${t.messages[0]?.author}: ${t.messages[0]?.text ?? ''}`.slice(0, 200) });
+        const spot = await viewer.locate(pos.page, pos.top, pos.bottom, t.quote, pos.x);
+        if (!spot) continue;
+        pins.push({ id: t.id, page: pos.page, x: spot.x, y: spot.y, width: spot.width, height: spot.height, color: colorFor(t.login.replace(/:agent$/, '')), title: `${t.messages[0]?.author}: ${t.messages[0]?.text ?? ''}`.slice(0, 200) });
       }
       if (request !== pinsRequest) return;
       viewer.setPins(pins);

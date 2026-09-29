@@ -16,13 +16,35 @@ pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
 type Tab = 'pdf' | 'log' | 'comments' | 'file';
 
+interface TextRun {
+  str: string;
+  x: number;
+  top: number;
+  size: number;
+  width: number;
+}
+
 /** A comment's pin on the PDF, at its SyncTeX position. */
 export interface PdfPin {
   id: string;
   page: number;
+  /** The commented words' box on the page, in PDF points from the top-left. */
+  x: number;
   y: number;
+  width: number;
+  height: number;
   color: string;
   title: string;
+}
+
+/** Where a quote is printed: its first line's box, in PDF points from the page's top-left. */
+export interface TextSpot {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** False when only the paragraph was found, not the words themselves. */
+  exact: boolean;
 }
 
 export interface ViewerOptions {
@@ -50,17 +72,17 @@ class PdfView {
   onPinClick: ((id: string, rect: DOMRect) => void) | null = null;
   private pins: PdfPin[] = [];
 
-  private textCache = new Map<number, Promise<Array<{ str: string; top: number }>>>();
+  private textCache = new Map<number, Promise<TextRun[]>>();
 
-  /** The page's text runs with their top edge in PDF points from the page top. */
-  private pageText(pageNumber: number): Promise<Array<{ str: string; top: number }>> {
+  /** The page's text runs: position, size and width in PDF points from the page's top-left. */
+  private pageText(pageNumber: number): Promise<TextRun[]> {
     let cached = this.textCache.get(pageNumber);
     if (!cached) {
       const p = this.pages[pageNumber - 1];
       cached = p ? p.page.getTextContent().then((tc) => tc.items.flatMap((item) => {
         if (!('str' in item) || !item.str) return [];
         const size = Math.hypot(item.transform[2], item.transform[3]) || 10;
-        return [{ str: item.str, top: p.height - item.transform[5] - size * 0.8 }];
+        return [{ str: item.str, x: item.transform[4], top: p.height - item.transform[5] - size * 0.8, size, width: item.width }];
       })) : Promise.resolve([]);
       this.textCache.set(pageNumber, cached);
     }
@@ -73,7 +95,7 @@ class PdfView {
    * nearest the block, else the block's top. Null only when the quote has no
    * printed words at all (a TeX comment, a command, the preamble).
    */
-  async locate(pageNumber: number, top: number, bottom: number, quote: string): Promise<number | null> {
+  async locate(pageNumber: number, top: number, bottom: number, quote: string, fallbackX = 0): Promise<TextSpot | null> {
     const words = quote
       .replace(/(^|[^\\])%.*$/gm, '$1')
       .replace(/\$[^$]*\$/g, ' ')
@@ -97,18 +119,26 @@ class PdfView {
       if (n === 1 && words[0].length < 4) break;
       // Words may be hyphenated across lines or split between runs.
       const pattern = new RegExp(words.slice(0, n).map((w) => w.split('').map(esc).join('(?:-?\\s*)?')).join('[\\s\\-]+'), 'giu');
-      let best: number | null = null;
+      let best: TextSpot | null = null;
       for (const m of text.matchAll(pattern)) {
-        const y = items[owner[m.index!]].top;
+        const run = items[owner[m.index!]];
+        const y = run.top;
         const distance = y < top - 12 ? top - 12 - y : y > bottom + 4 ? y - bottom - 4 : 0;
         if (distance > 40) continue;
-        if (best === null || Math.abs(y - (top + bottom) / 2) < Math.abs(best - (top + bottom) / 2)) best = y;
+        if (best && Math.abs(best.y - (top + bottom) / 2) <= Math.abs(y - (top + bottom) / 2)) continue;
+        // Horizontal position inside the run, assuming even character widths;
+        // the highlight covers the match up to the end of its first line.
+        const runStart = owner.indexOf(owner[m.index!]);
+        const perChar = run.width / Math.max(1, run.str.length);
+        const offset = m.index! - runStart;
+        const onThisRun = Math.min(m[0].length, run.str.length - offset);
+        best = { x: run.x + offset * perChar, y, width: Math.max(8, onThisRun * perChar), height: run.size, exact: true };
       }
-      if (best !== null) return best;
+      if (best) return best;
     }
-    // Printed words we could not find (odd markup, a ligature): the
-    // paragraph's own position is close enough.
-    return top;
+    // Printed words we could not find (odd markup, a ligature): the start of
+    // the paragraph is close enough.
+    return { x: fallbackX, y: top, width: 12, height: 10, exact: false };
   }
 
   /** Pins in the right margin of each page; several on one spot stack. */
@@ -117,20 +147,39 @@ class PdfView {
     this.drawPins();
   }
 
+  /**
+   * Each comment as a highlight over its exact words, and a speech bubble in
+   * the page's right margin level with them — like margin notes, so nothing
+   * printed is covered. Hovering either lights up both.
+   */
   private drawPins(): void {
-    for (const el of this.pagesEl.querySelectorAll('.pdf-pin')) el.remove();
-    const taken = new Map<string, number>();
+    for (const el of this.pagesEl.querySelectorAll('.pdf-pin, .pdf-comment-mark')) el.remove();
+    const stacked = new Map<string, number>();
     for (const pin of this.pins) {
       const p = this.pages[pin.page - 1];
       if (!p) continue;
-      const top = Math.max(0, pin.y * this.scale - 11);
-      const key = `${pin.page}:${Math.round(top / 18)}`;
-      const n = taken.get(key) ?? 0;
-      taken.set(key, n + 1);
-      const el = h('button', { class: 'pdf-pin', title: pin.title, style: `top:${top}px;right:${6 + n * 16}px;--c:${pin.color}` });
-      el.addEventListener('click', (e) => { e.stopPropagation(); this.onPinClick?.(pin.id, el.getBoundingClientRect()); });
-      el.addEventListener('dblclick', (e) => e.stopPropagation());
-      p.el.append(el);
+      const s = this.scale;
+      const open = (e: Event, anchor: HTMLElement) => { e.stopPropagation(); this.onPinClick?.(pin.id, anchor.getBoundingClientRect()); };
+      const mark = h('div', {
+        class: 'pdf-comment-mark', title: pin.title, 'data-thread': pin.id,
+        style: `left:${pin.x * s}px;top:${pin.y * s}px;width:${pin.width * s}px;height:${pin.height * s}px;--c:${pin.color}`,
+      });
+      // Several comments on one line sit side by side in the margin.
+      const row = `${pin.page}:${Math.round(pin.y / 6)}`;
+      const n = stacked.get(row) ?? 0;
+      stacked.set(row, n + 1);
+      const bubble = h('button', {
+        class: 'pdf-pin', title: pin.title, 'data-thread': pin.id,
+        style: `right:${5 + n * 17}px;top:${pin.y * s + Math.max(0, (pin.height * s - 12) / 2)}px;--c:${pin.color}`,
+      });
+      mark.addEventListener('click', (e) => open(e, mark));
+      bubble.addEventListener('click', (e) => open(e, bubble));
+      for (const el of [mark, bubble]) {
+        el.addEventListener('dblclick', (e) => e.stopPropagation());
+        el.addEventListener('mouseenter', () => { mark.classList.add('hot'); bubble.classList.add('hot'); });
+        el.addEventListener('mouseleave', () => { mark.classList.remove('hot'); bubble.classList.remove('hot'); });
+      }
+      p.el.append(mark, bubble);
     }
   }
 
@@ -326,12 +375,12 @@ export class Viewer {
   }
 
   /** Where each thread's pin is, for the annotated PDF download. */
-  pinPositions(): Record<string, { page: number; y: number }> {
-    return Object.fromEntries(this.pinsNow.map((p) => [p.id, { page: p.page, y: p.y }]));
+  pinPositions(): Record<string, { page: number; x: number; y: number; width: number; height: number }> {
+    return Object.fromEntries(this.pinsNow.map((p) => [p.id, { page: p.page, x: p.x, y: p.y, width: p.width, height: p.height }]));
   }
 
-  locate(page: number, top: number, bottom: number, quote: string): Promise<number | null> {
-    return this.pdf.locate(page, top, bottom, quote);
+  locate(page: number, top: number, bottom: number, quote: string, fallbackX?: number): Promise<TextSpot | null> {
+    return this.pdf.locate(page, top, bottom, quote, fallbackX);
   }
 
   get pdfLoaded(): boolean {

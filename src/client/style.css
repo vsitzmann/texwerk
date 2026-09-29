@@ -358,11 +358,19 @@ code { color: var(--cyan); }
 .thread-card.resolved { opacity: .55; }
 .thread-card.resolved:hover { opacity: .8; }
 
+.pdf-comment-mark {
+  position: absolute;
+  z-index: 1;
+  background: color-mix(in srgb, var(--c) 28%, transparent);
+  border-bottom: 2px solid var(--c);
+  mix-blend-mode: multiply;
+  cursor: pointer;
+}
 .pdf-pin {
   position: absolute;
   z-index: 2;
-  width: 16px;
-  height: 14px;
+  width: 14px;
+  height: 12px;
   padding: 0;
   border: 1px solid rgb(0 0 0 / 35%);
   border-radius: 4px 4px 4px 0;
@@ -370,7 +378,8 @@ code { color: var(--cyan); }
   box-shadow: 0 1px 4px rgb(0 0 0 / 40%);
   cursor: pointer;
 }
-.pdf-pin:hover { transform: scale(1.2); background: var(--c) !important; border-color: #000 !important; }
+.pdf-pin:hover, .pdf-pin.hot { transform: scale(1.25); background: var(--c) !important; border-color: #000 !important; }
+.pdf-comment-mark.hot { background: color-mix(in srgb, var(--c) 55%, transparent); outline: 1px solid var(--c); }
 
 /* ---------------------------------------------------------------- viewer */
 
