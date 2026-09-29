@@ -140,8 +140,9 @@ function editCost(edits: Array<{ remove: number; insert: string }>): number {
 const binHash = new Map<string, string>();
 const remoteTimers = new Map<string, NodeJS.Timeout>();
 const localTimers = new Map<string, NodeJS.Timeout>();
-/** Paths we are writing/deleting ourselves; the watcher ignores their echo. */
+/** Paths we are writing ourselves, and paths we removed; the watcher ignores their echo. */
 const selfTouched = new Map<string, number>();
+const selfRemoved = new Map<string, number>();
 let ready = false;
 /** Connected to the server with a synced replica. Local saves wait otherwise. */
 let online = false;
@@ -334,7 +335,7 @@ async function syncBinaryDown(path: string, info: BinInfo): Promise<void> {
 }
 
 async function removeLocal(path: string): Promise<void> {
-  selfTouched.set(path, Date.now());
+  selfRemoved.set(path, Date.now());
   shadow.delete(path);
   histories.delete(path);
   binHash.delete(path);
@@ -387,9 +388,10 @@ async function onLocalChange(rel: string): Promise<void> {
   try { info = await stat(abs(rel)); } catch { info = null; }
 
   if (!info) {
-    // Deleted locally. Our own removals echo here; skip those.
-    const touched = selfTouched.get(rel);
-    if (touched && Date.now() - touched < 2000) return;
+    // Deleted locally. Our own removals echo here; skip those (only
+    // removals — a file we just wrote and someone then deleted is a delete).
+    const removed = selfRemoved.get(rel);
+    if (removed && Date.now() - removed < 2000) return;
     if (texts.has(rel) || bins.has(rel) || dirs.has(rel)) {
       try {
         await http('POST', '/api/fs', JSON.stringify({ op: 'delete', path: rel }));

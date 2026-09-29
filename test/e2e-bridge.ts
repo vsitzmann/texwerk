@@ -79,6 +79,16 @@ await rm(join(mirror, 'intro.tex'));
 await until('delete at Bob', () => !texts.has('intro.tex'));
 console.log('ok   local delete propagated');
 
+// A delete right after a remote edit to the same file (the bridge has just
+// rewritten it) is still a delete, not an echo of the bridge's own write.
+await writeFile(join(mirror, 'fresh.tex'), 'fresh\n');
+await until('fresh at Bob', () => texts.get('fresh.tex')?.toString() === 'fresh\n');
+texts.get('fresh.tex')!.insert(0, 'edited by Bob ');
+await until('Bob edit on disk', async () => (await readFile(join(mirror, 'fresh.tex'), 'utf8')).startsWith('edited by Bob'));
+await rm(join(mirror, 'fresh.tex'));
+await until('fast delete at Bob', () => !texts.has('fresh.tex'));
+console.log('ok   delete right after a remote edit propagated');
+
 // Clean up our marks so the test can run again.
 const r = ytext.toString();
 doc.transact(() => {
