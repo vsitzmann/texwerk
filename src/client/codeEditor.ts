@@ -1,4 +1,4 @@
-import { Compartment, EditorState, type Extension } from '@codemirror/state';
+import { Compartment, EditorSelection, EditorState, type Extension } from '@codemirror/state';
 import {
   EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection,
   dropCursor, rectangularSelection, crosshairCursor, highlightSpecialChars, Decoration, type DecorationSet,
@@ -226,6 +226,20 @@ export interface CodeEditorOptions {
   onOpenThread?: (ids: string[], rect: DOMRect) => void;
 }
 
+/** Wrap each selection in `cmd{…}`, or insert `cmd{}` with the caret inside. */
+function wrapWith(cmd: string) {
+  return (view: EditorView): boolean => {
+    if (view.state.readOnly) return false;
+    view.dispatch(view.state.changeByRange((r) => ({
+      changes: [{ from: r.from, insert: `${cmd}{` }, { from: r.to, insert: '}' }],
+      range: r.empty
+        ? EditorSelection.cursor(r.from + cmd.length + 1)
+        : EditorSelection.range(r.from + cmd.length + 1, r.to + cmd.length + 1),
+    })));
+    return true;
+  };
+}
+
 export class CodeEditor {
   readonly view: EditorView;
   readonly path: string;
@@ -237,7 +251,13 @@ export class CodeEditor {
     this.undo = new Y.UndoManager(opts.ytext);
     const ext = extensionOf(opts.path);
     const language: Extension[] = ['tex', 'sty', 'cls', 'ltx', 'bib', 'bbx', 'cbx', 'dtx', 'tikz'].includes(ext)
-      ? [StreamLanguage.define(stex), latexSupport({ path: opts.path, texts: () => [], files: () => [], ...opts.project })]
+      ? [
+          StreamLanguage.define(stex), latexSupport({ path: opts.path, texts: () => [], files: () => [], ...opts.project }),
+          keymap.of([
+            { key: 'Mod-i', preventDefault: true, run: wrapWith('\\emph') },
+            { key: 'Mod-b', preventDefault: true, run: wrapWith('\\textbf') },
+          ]),
+        ]
       : [];
     const state = EditorState.create({
       doc: opts.ytext.toString(),
