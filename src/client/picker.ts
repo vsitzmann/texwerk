@@ -14,6 +14,7 @@ export interface ProjectEntry {
   folder: string;
   files: number;
   editedAt: number;
+  createdAt: number;
   editors: number;
   people: string[];
   owner?: string;
@@ -53,6 +54,14 @@ export function editedAgo(ts: number, now = Date.now()): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours} h ago`;
   if (hours < 48) return 'yesterday';
+  const date = new Date(ts);
+  return date.toLocaleDateString(undefined, {
+    month: 'short', day: 'numeric', ...(date.getFullYear() === new Date(now).getFullYear() ? {} : { year: 'numeric' }),
+  });
+}
+
+/** A creation date: "Oct 1", or "Oct 1, 2025" outside the current year. */
+export function createdOn(ts: number, now = Date.now()): string {
   const date = new Date(ts);
   return date.toLocaleDateString(undefined, {
     month: 'short', day: 'numeric', ...(date.getFullYear() === new Date(now).getFullYear() ? {} : { year: 'numeric' }),
@@ -106,7 +115,7 @@ export function showPicker(opts: { me: Me; dismissable: boolean; folder?: string
 
   const folderRow = (entry: FolderEntry): HTMLElement => {
     const row = pickerRow('button', entry.name, [
-      `${entry.projects} project${entry.projects === 1 ? '' : 's'}`, '', '', opts.me.access ? entry.owner ?? '' : '', '',
+      `${entry.projects} project${entry.projects === 1 ? '' : 's'}`, '', '', '', opts.me.access ? entry.owner ?? '' : '', '',
     ]);
     row.classList.add('picker-folder');
     row.addEventListener('click', () => reopen(entry.path));
@@ -130,12 +139,14 @@ export function showPicker(opts: { me: Me; dismissable: boolean; folder?: string
     const row = pickerRow('button', p.name, [
       `${p.files} file${p.files === 1 ? '' : 's'}`,
       editedAgo(p.editedAt),
+      createdOn(p.createdAt),
       p.editors > 0 ? `${p.editors} editing` : '',
       opts.me.access && p.owner && p.owner !== opts.me.you.login ? p.owner : '',
       accessCell,
     ]);
     row.children[2]?.setAttribute('title', new Date(p.editedAt).toLocaleString());
-    if (p.editors > 0) { row.children[3]?.classList.add('picker-live'); row.children[3]?.setAttribute('title', p.people.join(', ')); }
+    row.children[3]?.setAttribute('title', new Date(p.createdAt).toLocaleString());
+    if (p.editors > 0) { row.children[4]?.classList.add('picker-live'); row.children[4]?.setAttribute('title', p.people.join(', ')); }
     if (p.id === opts.current) row.classList.add('active');
     row.addEventListener('click', () => go(p.id));
     if (!p.canManage) return rowGroup(row, []);
@@ -253,7 +264,7 @@ export function showPicker(opts: { me: Me; dismissable: boolean; folder?: string
   const who = opts.me.access ? h('span', { class: 'picker-who', title: opts.me.you.login }, `${opts.me.you.name}${opts.me.admin ? ' · admin' : ''}`) : '';
   box.append(
     h('div', { class: 'picker-head' }, h('h2', {}, 'Projects on this server'), trail, who),
-    h('div', { class: 'picker-columns' }, rowGroup(pickerRow('div', 'Name', ['Size', 'Last edit', 'Editing', 'Owner', 'Access']), [])),
+    h('div', { class: 'picker-columns' }, rowGroup(pickerRow('div', 'Name', ['Size', 'Last edit', 'Created', 'Editing', 'Owner', 'Access']), [])),
     list,
     h('div', { class: 'picker-foot' }, progress, actions));
   overlay.append(box);

@@ -202,6 +202,7 @@ export async function startServer(options: ServerOptions) {
     folder: string;
     files: number;
     editedAt: number;
+    createdAt: number;
     editors: number;
     people: string[];
     owner?: string;
@@ -266,7 +267,10 @@ export async function startServer(options: ServerOptions) {
         const role = access ? roleFor(identity.login, projectAccess!, access) : 'owner';
         if (!role) continue;
         accessible += 1;
-        let editedAt = (await stat(childDir)).mtimeMs;
+        const dirStat = await stat(childDir);
+        let editedAt = dirStat.mtimeMs;
+        // Birth time where the filesystem records it (btrfs, ext4, APFS); else the oldest time we have.
+        const createdAt = dirStat.birthtimeMs > 0 ? dirStat.birthtimeMs : Math.min(dirStat.mtimeMs, dirStat.ctimeMs);
         try { editedAt = Math.max(editedAt, (await stat(join(childDir, '.texwerk', 'history', 'log.jsonl'))).mtimeMs); } catch { /* never edited here */ }
         const open = projects.get(id);
         const p = open ? await open.catch(() => null) : null;
@@ -274,7 +278,7 @@ export async function startServer(options: ServerOptions) {
         outProjects.push({
           id, name: e.name, folder: rel,
           files: p ? p.allFiles().length : await countFiles(childDir),
-          editedAt, editors: people.length, people,
+          editedAt, createdAt, editors: people.length, people,
           owner: projectAccess?.owner,
           visibility: projectAccess?.visibility,
           publicRole: projectAccess?.publicRole,

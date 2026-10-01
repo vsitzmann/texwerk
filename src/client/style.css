@@ -630,7 +630,7 @@ code { color: var(--cyan); }
 }
 .picker-overlay.landing { background: var(--bg); backdrop-filter: none; }
 .picker {
-  --picker-columns: minmax(0, 1fr) 110px 110px 90px 190px 110px;
+  --picker-columns: minmax(0, 1fr) 110px 110px 100px 90px 190px 110px;
   --picker-gutter: 18px;
   display: flex;
   width: calc(100vw - 48px);
