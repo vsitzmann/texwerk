@@ -12,7 +12,7 @@ import { api, confirmDialog, formatTime, h, toast } from './ui.ts';
  */
 
 export interface CommentsOptions {
-  project: string;
+  project: () => string;
   doc: Y.Doc;
   me: () => { login: string; name: string };
   canModerate: () => boolean;
@@ -91,7 +91,7 @@ export class Comments {
 
   private async act(body: Record<string, unknown>): Promise<boolean> {
     try {
-      await api('POST', `/api/comments?project=${encodeURIComponent(this.opts.project)}`, body);
+      await api('POST', `/api/comments?project=${encodeURIComponent(this.opts.project())}`, body);
       return true;
     } catch (err) {
       toast((err as Error).message, 'bad');

@@ -58,7 +58,8 @@ if (!sessionArg || sessionArg === '-h' || sessionArg === '--help') usage();
 const session = new URL(sessionArg);
 const projectParam = session.searchParams.get('project');
 if (!projectParam) usage();
-const project: string = projectParam;
+/** Changes if the project is renamed while mirrored (a `moved` event). */
+let project: string = projectParam;
 const typedName = session.searchParams.get('name');
 const origin = session.origin;
 const root = resolve(folderArg ?? project.replace(/[^\w.-]+/g, '-'));
@@ -687,12 +688,16 @@ async function main(): Promise<void> {
   process.on('SIGTERM', stop);
 }
 
-function startSession(): void {
+function sessionUrl(): string {
   const wsUrl = new URL(`/ws?${query({ bridge: '1' })}`, origin);
   wsUrl.protocol = wsUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+  return wsUrl.href;
+}
+
+function startSession(): void {
   let firstSync = true;
-  new Provider({
-    url: wsUrl.href,
+  const provider: Provider = new Provider({
+    url: sessionUrl(),
     doc,
     awareness,
     onStatus: (status, detail) => {
@@ -706,6 +711,14 @@ function startSession(): void {
         void writeHelpers();
       } else if (event.t === 'compile') {
         void onCompile(event.compile);
+      } else if (event.t === 'moved' && event.to !== project) {
+        // Renamed on the server: follow it. The folder here keeps its name;
+        // mirror.json (which `tw` reads) and AGENT.md take the new one.
+        log(`the project was renamed to "${event.to}"`);
+        project = event.to;
+        provider.setUrl(sessionUrl());
+        if (ready) void saveMarker();
+        void writeHelpers();
       }
     },
     onReset: () => void resetSession(),

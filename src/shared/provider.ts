@@ -157,6 +157,11 @@ export class Provider {
     }
   }
 
+  /** Where the next (re)connect goes — the project was renamed. */
+  setUrl(url: string): void {
+    this.opts.url = url;
+  }
+
   private send(data: Uint8Array): void {
     if (this.ws && this.ws.readyState === 1 && this.helloSeen) this.ws.send(data as Uint8Array<ArrayBuffer>);
   }

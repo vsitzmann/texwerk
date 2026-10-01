@@ -48,7 +48,7 @@ export interface TextSpot {
 }
 
 export interface ViewerOptions {
-  project: string;
+  project: () => string;
   onJumpToSource: (file: string, line: number) => void;
   onCloseFile: () => void;
   onSyncFromCursor: () => void;
@@ -361,7 +361,7 @@ export class Viewer {
     if (summary.state === 'done' && summary.hasPdf && summary.rev !== this.lastPdfRev) {
       this.lastPdfRev = summary.rev;
       this.loadingPdf = true;
-      void this.pdf.load(withName(`/pdf/${encodeURIComponent(this.opts.project)}/output.pdf?rev=${summary.rev}`))
+      void this.pdf.load(withName(`/pdf/${encodeURIComponent(this.opts.project())}/output.pdf?rev=${summary.rev}`))
         .finally(() => { this.loadingPdf = false; this.render(); this.opts.onPdfLoaded(); });
     }
     this.render();
@@ -422,7 +422,7 @@ export class Viewer {
   }
 
   private async syncToSource(page: number, x: number, y: number): Promise<void> {
-    const r = await fetch(withName(`/api/synctex/edit?project=${encodeURIComponent(this.opts.project)}&page=${page}&x=${x}&y=${y}`));
+    const r = await fetch(withName(`/api/synctex/edit?project=${encodeURIComponent(this.opts.project())}&page=${page}&x=${x}&y=${y}`));
     const data = await r.json() as { file: string | null; line?: number };
     if (data.file && data.line) this.opts.onJumpToSource(data.file, data.line);
   }
@@ -529,7 +529,7 @@ export class Viewer {
 
   private renderFile(): void {
     const { path, hash } = this.file!;
-    const url = withName(`/raw/${encodeURIComponent(this.opts.project)}/${path.split('/').map(encodeURIComponent).join('/')}?v=${hash}`);
+    const url = withName(`/raw/${encodeURIComponent(this.opts.project())}/${path.split('/').map(encodeURIComponent).join('/')}?v=${hash}`);
     const ext = extensionOf(path);
     const key = `${path}|${hash}`;
     if (this.fileView.dataset.key === key) return;

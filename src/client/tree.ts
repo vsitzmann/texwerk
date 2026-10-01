@@ -11,7 +11,7 @@ import { api, confirmDialog, h, menuAt, prompt, toast, upload, withName } from '
  */
 
 export interface TreeOptions {
-  project: string;
+  project: () => string;
   texts: Y.Map<Y.Text>;
   bins: Y.Map<BinInfo>;
   dirs: Y.Map<boolean>;
@@ -55,7 +55,7 @@ export class FileTree {
 
   constructor(opts: TreeOptions) {
     this.opts = opts;
-    try { for (const p of JSON.parse(localStorage.getItem(`texwerk-collapsed:${opts.project}`) ?? '[]')) this.collapsed.add(p); } catch { /* none */ }
+    try { for (const p of JSON.parse(localStorage.getItem(`texwerk-collapsed:${opts.project()}`) ?? '[]')) this.collapsed.add(p); } catch { /* none */ }
     this.headButtons.push(
       h('button', { class: 'ghost icon', title: 'New file', onclick: () => void this.newFile('') }, '+file'),
       h('button', { class: 'ghost icon', title: 'New folder', onclick: () => void this.newFolder('') }, '+dir'),
@@ -200,7 +200,7 @@ export class FileTree {
     row.addEventListener('click', () => {
       if (node.dir) {
         if (this.collapsed.has(node.path)) this.collapsed.delete(node.path); else this.collapsed.add(node.path);
-        try { localStorage.setItem(`texwerk-collapsed:${this.opts.project}`, JSON.stringify([...this.collapsed])); } catch { /* ignore */ }
+        try { localStorage.setItem(`texwerk-collapsed:${this.opts.project()}`, JSON.stringify([...this.collapsed])); } catch { /* ignore */ }
         this.render();
       } else {
         this.opts.onOpen(node.path);
@@ -220,13 +220,13 @@ export class FileTree {
 
   private fileMenu(path: string): HTMLElement[] {
     if (this.readOnly) {
-      const dl = withName(`/raw/${encodeURIComponent(this.opts.project)}/${path.split('/').map(encodeURIComponent).join('/')}?download=1`);
+      const dl = withName(`/raw/${encodeURIComponent(this.opts.project())}/${path.split('/').map(encodeURIComponent).join('/')}?download=1`);
       return [
         h('button', { onclick: () => this.opts.onOpen(path) }, 'Open'),
         h('button', { onclick: () => { const a = h('a', { href: dl }); document.body.append(a); a.click(); a.remove(); } }, 'Download'),
       ];
     }
-    const url = withName(`/raw/${encodeURIComponent(this.opts.project)}/${path.split('/').map(encodeURIComponent).join('/')}?download=1`);
+    const url = withName(`/raw/${encodeURIComponent(this.opts.project())}/${path.split('/').map(encodeURIComponent).join('/')}?download=1`);
     const items: HTMLElement[] = [
       h('button', { onclick: () => this.opts.onOpen(path) }, 'Open'),
       h('button', { onclick: () => { this.renaming = path; this.render(); } }, 'Rename'),
@@ -261,7 +261,7 @@ export class FileTree {
     if (!name) return;
     const path = dir ? `${dir}/${name}` : name;
     try {
-      await api('POST', `/api/fs?project=${encodeURIComponent(this.opts.project)}`, { op: 'newfile', path });
+      await api('POST', `/api/fs?project=${encodeURIComponent(this.opts.project())}`, { op: 'newfile', path });
       setTimeout(() => this.opts.onOpen(path), 50);
     } catch (err) { toast((err as Error).message, 'bad'); }
   }
@@ -269,18 +269,18 @@ export class FileTree {
   private async newFolder(dir: string): Promise<void> {
     const name = await prompt('New folder', dir ? `In ${dir}/` : 'In the project root.', 'figures', 'Create');
     if (!name) return;
-    try { await api('POST', `/api/fs?project=${encodeURIComponent(this.opts.project)}`, { op: 'mkdir', path: dir ? `${dir}/${name}` : name }); } catch (err) { toast((err as Error).message, 'bad'); }
+    try { await api('POST', `/api/fs?project=${encodeURIComponent(this.opts.project())}`, { op: 'mkdir', path: dir ? `${dir}/${name}` : name }); } catch (err) { toast((err as Error).message, 'bad'); }
   }
 
   private async remove(path: string): Promise<void> {
     const isDir = this.opts.dirs.has(path);
     const ok = await confirmDialog(`Delete ${isDir ? 'folder' : 'file'}`, `Delete "${path}"${isDir ? ' and everything in it' : ''}? It stays in the history and can be restored from there.`, 'Delete', true);
     if (!ok) return;
-    try { await api('POST', `/api/fs?project=${encodeURIComponent(this.opts.project)}`, { op: 'delete', path }); } catch (err) { toast((err as Error).message, 'bad'); }
+    try { await api('POST', `/api/fs?project=${encodeURIComponent(this.opts.project())}`, { op: 'delete', path }); } catch (err) { toast((err as Error).message, 'bad'); }
   }
 
   private async move(from: string, to: string): Promise<void> {
-    try { await api('POST', `/api/fs?project=${encodeURIComponent(this.opts.project)}`, { op: 'move', path: from, to }); } catch (err) { toast((err as Error).message, 'bad'); }
+    try { await api('POST', `/api/fs?project=${encodeURIComponent(this.opts.project())}`, { op: 'move', path: from, to }); } catch (err) { toast((err as Error).message, 'bad'); }
   }
 
   // ------------------------------------------------------------- uploads
@@ -370,7 +370,7 @@ export class FileTree {
     const show = (text: string) => { if (Date.now() - started > 400) this.opts.setStatus(text); };
     for (const [i, { file, path }] of files.entries()) {
       try {
-        await upload(`/api/file?project=${encodeURIComponent(this.opts.project)}&path=${encodeURIComponent(path)}`, file, (fraction) => {
+        await upload(`/api/file?project=${encodeURIComponent(this.opts.project())}&path=${encodeURIComponent(path)}`, file, (fraction) => {
           show(`Uploading ${path} (${i + 1}/${files.length}) — ${Math.round(((done + fraction * file.size) / total) * 100)}%`);
         });
       } catch (err) {

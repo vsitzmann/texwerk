@@ -33,7 +33,7 @@ interface LabelItem {
 type Item = Group | LabelItem;
 
 export interface HistoryOptions {
-  project: string;
+  project: () => string;
   onClose: () => void;
   onLabel: () => void;
 }
@@ -56,7 +56,7 @@ export class HistoryView {
   }
 
   async refresh(): Promise<void> {
-    const data = await api<{ entries: HistoryEntry[]; labels: GitLabel[] }>('GET', `/api/history?project=${encodeURIComponent(this.opts.project)}`);
+    const data = await api<{ entries: HistoryEntry[]; labels: GitLabel[] }>('GET', `/api/history?project=${encodeURIComponent(this.opts.project())}`);
     this.entries = data.entries;
     this.items = this.buildItems(data.entries, data.labels);
     const keep = this.selected;
@@ -135,7 +135,7 @@ export class HistoryView {
   private blob(hash: string): Promise<string> {
     let p = this.blobCache.get(hash);
     if (!p) {
-      p = fetch(withName(`/api/history/blob?project=${encodeURIComponent(this.opts.project)}&hash=${hash}`)).then((r) => r.text());
+      p = fetch(withName(`/api/history/blob?project=${encodeURIComponent(this.opts.project())}&hash=${hash}`)).then((r) => r.text());
       this.blobCache.set(hash, p);
     }
     return p;
@@ -166,7 +166,7 @@ export class HistoryView {
         const ok = await confirmDialog('Revert to label', `Put every file back the way it was at "${l.message}"? The current state stays in the history, and the revert is saved as a new label.`, 'Revert', true);
         if (!ok) return;
         try {
-          await api('POST', `/api/git/revert?project=${encodeURIComponent(this.opts.project)}`, { commit: l.commit, message: l.message });
+          await api('POST', `/api/git/revert?project=${encodeURIComponent(this.opts.project())}`, { commit: l.commit, message: l.message });
           toast(`Reverted to "${l.message}"`, 'ok');
           await this.refresh();
         } catch (err) { toast((err as Error).message, 'bad'); }
@@ -203,7 +203,7 @@ export class HistoryView {
       const ok = await confirmDialog('Restore file', `Set "${file}" back to this version? Everyone sees the change live, and it can be undone from the history too.`, 'Restore');
       if (!ok) return;
       try {
-        await api('POST', `/api/history/restore-file?project=${encodeURIComponent(this.opts.project)}`, { path: file, hash: lastInGroup.op === 'delete' ? null : lastInGroup.hash ?? null });
+        await api('POST', `/api/history/restore-file?project=${encodeURIComponent(this.opts.project())}`, { path: file, hash: lastInGroup.op === 'delete' ? null : lastInGroup.hash ?? null });
         toast(`Restored ${file}`, 'ok');
       } catch (err) { toast((err as Error).message, 'bad'); }
     });
@@ -212,7 +212,7 @@ export class HistoryView {
       const ok = await confirmDialog('Restore project', `Put every file back to how it was at ${formatTime(g.last.ts)}? The current state stays in the history.`, 'Restore project', true);
       if (!ok) return;
       try {
-        await api('POST', `/api/history/restore-project?project=${encodeURIComponent(this.opts.project)}`, { id: g.last.id });
+        await api('POST', `/api/history/restore-project?project=${encodeURIComponent(this.opts.project())}`, { id: g.last.id });
         toast('Project restored', 'ok');
       } catch (err) { toast((err as Error).message, 'bad'); }
     });

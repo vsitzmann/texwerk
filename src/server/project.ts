@@ -271,7 +271,22 @@ export class Project {
 
   // ------------------------------------------------------------ connections
 
+  /** Where this project is being renamed to, once a rename has started. */
+  private movedTo: string | null = null;
+
+  /** Tell everyone connected, now and until the sockets close, the project's new id. */
+  announceMove(to: string): void {
+    this.movedTo = to;
+    this.broadcastEvent({ t: 'moved', to });
+  }
+
   addConn(conn: Conn): void {
+    if (this.closed) {
+      // Raced a rename: point it at the new id and let it reconnect there.
+      if (this.movedTo) this.sendEvent(conn, { t: 'moved', to: this.movedTo });
+      conn.ws.close(1012, 'project renamed');
+      return;
+    }
     this.conns.add(conn);
     if (this.unloadTimer) { clearTimeout(this.unloadTimer); this.unloadTimer = null; }
     this.sendEvent(conn, {
@@ -281,6 +296,7 @@ export class Project {
     encoding.writeVarUint(enc, MSG_SYNC);
     syncProtocol.writeSyncStep1(enc, this.doc);
     conn.ws.send(encoding.toUint8Array(enc));
+    if (this.movedTo) this.sendEvent(conn, { t: 'moved', to: this.movedTo });
     const states = [...this.awareness.getStates().keys()];
     if (states.length) {
       const aw = encoding.createEncoder();
@@ -297,6 +313,9 @@ export class Project {
   }
 
   handleMessage(conn: Conn, data: Uint8Array): void {
+    // Closed but the socket not yet (a rename in progress): the client still
+    // holds the change and sends it again when it syncs with the new id.
+    if (this.closed) return;
     const dec = decoding.createDecoder(data);
     const type = decoding.readVarUint(dec);
     if (type === MSG_SYNC) {
@@ -434,6 +453,9 @@ export class Project {
 
   /** Fold whatever is on disk at `rel` into the document. */
   async reconcile(rel: string, author = 'disk'): Promise<void> {
+    // After close the folder may be moving (a rename): what is missing from
+    // the old path was not deleted.
+    if (this.closed) return;
     const abs = join(this.dir, rel);
     const origin: ServerOrigin = { author };
     let info;
@@ -722,6 +744,7 @@ export class Project {
   // --------------------------------------------------------------- lifecycle
 
   private scheduleUnload(): void {
+    if (this.closed) return;
     if (this.unloadTimer) clearTimeout(this.unloadTimer);
     this.unloadTimer = setTimeout(() => {
       if (this.conns.size === 0 && !this.compiling) void this.close().then(() => this.onUnload?.());
@@ -936,8 +959,21 @@ export class Project {
     }, { author: login });
   }
 
-  async close(): Promise<void> {
+  private closed = false;
+
+  /**
+   * Persist everything and stop. `closeConns: false` leaves the sockets open
+   * for the caller to close (a rename closes them only once the folder has
+   * moved, so nobody reconnects before the new id exists).
+   */
+  async close(closeConns = true): Promise<void> {
+    // Sockets closed here come back through removeConn → scheduleUnload,
+    // which must not persist a destroyed document a second time.
+    if (this.closed) return;
+    this.closed = true;
     this.stopWatching?.();
+    for (const t of this.watchTimers.values()) clearTimeout(t);
+    this.watchTimers.clear();
     if (this.flushTimer) clearInterval(this.flushTimer);
     if (this.autoCompileTimer) clearTimeout(this.autoCompileTimer);
     if (this.unloadTimer) clearTimeout(this.unloadTimer);
@@ -945,7 +981,7 @@ export class Project {
     this.saveComments();
     this.saveDoc();
     await this.history.flush(true);
-    for (const c of this.conns) c.ws.close(1001, 'server shutting down');
+    if (closeConns) for (const c of this.conns) c.ws.close(1001, 'server shutting down');
     this.doc.destroy();
   }
 }

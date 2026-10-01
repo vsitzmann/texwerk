@@ -235,3 +235,65 @@ test('LaTeX: an environment knows whether it is closed, and which one is open', 
   // Commented-out environments don't count.
   assert.equal(openEnvAt('% \\begin{itemize}\nx', 19), null);
 });
+
+test('renaming an open project moves everyone in it, edits made during the move included', async () => {
+  const { mkdir } = await import('node:fs/promises');
+  const { existsSync, readFileSync } = await import('node:fs');
+  const { Awareness } = await import('y-protocols/awareness');
+  const { Provider } = await import('../src/shared/provider.ts');
+  const { startServer } = await import('../src/server/server.ts');
+  const root = await mkdtemp(join(tmpdir(), 'texwerk-rename-'));
+  await mkdir(join(root, 'Draft'));
+  await writeFile(join(root, 'Draft', 'main.tex'), 'Hello.\n');
+  const port = 20000 + Math.floor(Math.random() * 20000);
+  const server = await startServer({ rootDir: root, clientDir: null, bridgeFile: null, port, host: '127.0.0.1', access: null });
+  const until = async (what: string, check: () => boolean, ms = 5000) => {
+    const start = Date.now();
+    while (!check()) {
+      if (Date.now() - start > ms) throw new Error(`timed out: ${what}`);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  };
+  const join_ = (name: string) => {
+    const doc = new Y.Doc();
+    const url = (id: string) => `ws://127.0.0.1:${port}/ws?project=${encodeURIComponent(id)}&name=${name}`;
+    let synced = 0;
+    const statuses: string[] = [];
+    const provider: InstanceType<typeof Provider> = new Provider({
+      url: url('Draft'), doc, awareness: new Awareness(doc),
+      onSynced: () => { synced++; },
+      onStatus: (s, detail) => statuses.push(`${s}${detail ? `:${detail}` : ''}`),
+      // What the editor and the bridge do with it.
+      onEvent: (event) => { if (event.t === 'moved') provider.setUrl(url(event.to)); },
+    });
+    return { doc, provider, statuses, synced: () => synced, text: () => doc.getMap<Y.Text>('text').get('main.tex')?.toString() ?? '' };
+  };
+  const alice = join_('Alice');
+  const bob = join_('Bob');
+  try {
+    await until('both synced', () => alice.synced() > 0 && bob.synced() > 0 && bob.text() === 'Hello.\n');
+    const renamed = fetch(`http://127.0.0.1:${port}/api/projects/rename?project=Draft&newName=${encodeURIComponent('Final paper')}&name=Alice`, { method: 'POST' });
+    // Bob keeps typing while the folder moves.
+    bob.doc.getMap<Y.Text>('text').get('main.tex')!.insert(0, 'Bob. ');
+    const r = await renamed;
+    assert.equal(r.status, 200);
+    assert.deepEqual(await r.json(), { id: 'Final paper' });
+    assert.ok(!existsSync(join(root, 'Draft')), 'the old folder is gone');
+    await until('both reconnected', () => alice.synced() > 1 && bob.synced() > 1);
+    alice.doc.getMap<Y.Text>('text').get('main.tex')!.insert(alice.text().length, 'Alice.\n');
+    await until('edits converge', () => alice.text() === 'Bob. Hello.\nAlice.\n' && bob.text() === alice.text());
+    await until('on disk under the new name', () => {
+      try { return readFileSync(join(root, 'Final paper', 'main.tex'), 'utf8') === 'Bob. Hello.\nAlice.\n'; } catch { return false; }
+    });
+    // Nothing reopened the old id behind everyone's back.
+    assert.ok(!existsSync(join(root, 'Draft')));
+    assert.ok(!alice.statuses.concat(bob.statuses).some((s) => s.includes('no project')), 'nobody landed on the old id');
+  } finally {
+    alice.provider.destroy();
+    bob.provider.destroy();
+    alice.doc.destroy(); // and with it the awareness and its timer
+    bob.doc.destroy();
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

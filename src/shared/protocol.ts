@@ -65,6 +65,12 @@ export type ServerEvent =
   | { t: 'git' }
   | { t: 'settings'; settings: ProjectSettings }
   | { t: 'renamed'; from: string; to: string }
+  /**
+   * The project itself was renamed while open: it now lives at `to`. Point
+   * the connection there; the server closes this socket once the folder has
+   * moved, and the reconnect resumes the same document (same epoch).
+   */
+  | { t: 'moved'; to: string }
   | { t: 'notice'; message: string };
 
 export interface ProjectSettings {

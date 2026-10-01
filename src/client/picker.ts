@@ -123,7 +123,7 @@ export function showPicker(opts: { me: Me; dismissable: boolean; folder?: string
     const rename = rowButton('Rename…', 'Give this folder another name', async () => {
       const name = await prompt('Rename folder', 'Projects inside keep their contents; their links change.', entry.name, 'Rename');
       if (!name || name === entry.name) return;
-      await api('POST', `/api/folders/rename?path=${encodeURIComponent(entry.path)}&name=${encodeURIComponent(name)}`)
+      await api('POST', `/api/folders/rename?path=${encodeURIComponent(entry.path)}&newName=${encodeURIComponent(name)}`)
         .then(() => reopen(folder), fail('Rename'));
     });
     const remove = rowButton('Delete…', 'Delete this folder (only when it is empty)', async () => {
@@ -153,7 +153,7 @@ export function showPicker(opts: { me: Me; dismissable: boolean; folder?: string
     const rename = rowButton('Rename…', 'Give this project another name', async () => {
       const name = await prompt('Rename project', 'The project folder on the server is renamed too.', p.name, 'Rename');
       if (!name || name === p.name) return;
-      await api<{ id: string }>('POST', `/api/projects/rename?project=${encodeURIComponent(p.id)}&name=${encodeURIComponent(name)}`)
+      await api<{ id: string }>('POST', `/api/projects/rename?project=${encodeURIComponent(p.id)}&newName=${encodeURIComponent(name)}`)
         .then((r) => (p.id === opts.current ? go(r.id) : reopen(folder)), fail('Rename'));
     });
     const move = rowButton('Move…', 'Put this project in a folder', () => showMoveDialog(p, folders, (r) => (p.id === opts.current ? go(r) : reopen(folderOf(r)))));
@@ -216,7 +216,7 @@ export function showPicker(opts: { me: Me; dismissable: boolean; folder?: string
       if (!name) return;
       const timer = setTimeout(() => report(`Uploading ${file.name} (${(file.size / 1e6).toFixed(1)} MB)…`), 500);
       try {
-        const r = await api<{ id: string }>('POST', `/api/projects/import?name=${encodeURIComponent(name)}&folder=${encodeURIComponent(folder)}`, file);
+        const r = await api<{ id: string }>('POST', `/api/projects/import?newName=${encodeURIComponent(name)}&folder=${encodeURIComponent(folder)}`, file);
         go(r.id);
       } catch (err) { fail('Import')(err); } finally { clearTimeout(timer); report(''); }
     });

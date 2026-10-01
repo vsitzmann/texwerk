@@ -137,6 +137,8 @@ export async function startServer(options: ServerOptions) {
   const rootDir = resolve(options.rootDir);
   await mkdir(rootDir, { recursive: true });
   const projects = new Map<string, Promise<Project>>();
+  /** Projects whose folder is being renamed: nobody may (re)open the old id meanwhile. */
+  const relocating = new Set<string>();
   const access = options.access ? { admin: normalizeLogin(options.access.admin) } : null;
   const users = access ? new UserDirectory(join(rootDir, '.texwerk-users.json')) : null;
 
@@ -158,6 +160,7 @@ export async function startServer(options: ServerOptions) {
     const dir = dirOf(clean);
     let pending = projects.get(clean);
     if (!pending) {
+      if (relocating.has(clean)) throw new HttpError(409, 'this project is being renamed');
       if (!isProjectDir(dir)) throw new HttpError(404, `no project "${clean}"`);
       pending = (async () => {
         const p = new Project(clean, dir);
@@ -323,6 +326,15 @@ export async function startServer(options: ServerOptions) {
     await writeAccess(dirOf(id), { owner: identity.login, visibility: 'private', sharedWith: [], publicRole: 'view' });
   }
 
+  /**
+   * The name a project or folder is to get. `name` is also the typed identity
+   * the client adds to every request without --access, so it travels as
+   * `newName`; `name` is still read from clients that predate that.
+   */
+  function newNameParam(url: URL): string | null {
+    return url.searchParams.get('newName') ?? url.searchParams.get('name');
+  }
+
   function identityOf(request: IncomingMessage, url: URL): Identity {
     const identity = resolveIdentity(request, options.access, url.searchParams.get('name') ?? request.headers['x-texwerk-name'] as string ?? null);
     if (!identity) throw new HttpError(403, 'unidentified connection — this server is reachable only through tailscale serve');
@@ -431,7 +443,7 @@ export async function startServer(options: ServerOptions) {
     }
 
     if (path === '/api/projects/import' && method === 'POST') {
-      const id = await newProjectId(identity, url.searchParams.get('name'), url.searchParams.get('folder'));
+      const id = await newProjectId(identity, newNameParam(url), url.searchParams.get('folder'));
       const dir = dirOf(id);
       const entries = readZip(await readBody(request));
       // An archive of a single folder is unwrapped: import its contents.
@@ -461,24 +473,54 @@ export async function startServer(options: ServerOptions) {
       return json(response, 200, { id, output: r.output });
     }
 
-    // Renaming or moving changes the id, so the project must not be open.
-    const relocate = async (from: string, to: string) => {
+    /**
+     * Renaming or moving changes the id. Moving needs the project closed; a
+     * rename (`live`) may happen with people in it, as from the editor's own
+     * title: everyone connected is told the new id, the project is persisted
+     * and closed, the folder moves, and only then are the sockets closed —
+     * so each client's reconnect lands on the new id and resumes the same
+     * document (the epoch travels with the folder), unsent edits included.
+     */
+    const relocate = async (from: string, to: string, live = false) => {
       if (existsSync(dirOf(to))) throw new HttpError(409, `"${to.split('/').pop()}" already exists there`);
-      const open = projects.get(from);
-      if (open && (await open.catch(() => null))?.conns.size) {
-        throw new HttpError(409, 'someone has this project open; it can be renamed or moved once everyone has closed it');
+      if (relocating.has(from)) throw new HttpError(409, 'this project is being renamed');
+      relocating.add(from);
+      let conns: Conn[] = [];
+      try {
+        const open = projects.get(from);
+        const project = open ? await open.catch(() => null) : null;
+        if (project?.conns.size && !live) {
+          throw new HttpError(409, 'someone has this project open; it can be moved once everyone has closed it');
+        }
+        if (project) {
+          project.announceMove(to);
+          // A compile writes into the folder by absolute path: let it finish
+          // (and any compile queued behind it) before the folder moves.
+          for (let c = project.isCompiling(); c; c = project.isCompiling()) await c.catch(() => {});
+          conns = [...project.conns];
+          projects.delete(from);
+          await project.close(false);
+        }
+        try {
+          await rename(dirOf(from), dirOf(to));
+        } catch (err) {
+          // Still where it was: send everyone back to the old id.
+          for (const c of conns) if (c.ws.readyState === c.ws.OPEN) c.ws.send(JSON.stringify({ t: 'moved', to: from }));
+          throw err;
+        }
+      } finally {
+        relocating.delete(from);
+        for (const c of conns) c.ws.close(4302, 'project renamed');
       }
-      await closeProject(from);
-      await rename(dirOf(from), dirOf(to));
     };
 
     if (path === '/api/projects/rename' && method === 'POST') {
       const id = cleanProjectId(projectParam ?? '') ?? '';
       await requireRole(identity, id, 'manage');
-      const name = cleanProjectName(url.searchParams.get('name') ?? '');
+      const name = cleanProjectName(newNameParam(url) ?? '');
       if (!name) throw new HttpError(400, 'invalid name');
       const to = id.includes('/') ? `${id.slice(0, id.lastIndexOf('/'))}/${name}` : name;
-      if (to !== id) await relocate(id, to);
+      if (to !== id) await relocate(id, to, true);
       return json(response, 200, { id: to });
     }
 
@@ -513,7 +555,7 @@ export async function startServer(options: ServerOptions) {
 
     if (path === '/api/folders/rename' && method === 'POST') {
       const folder = await manageFolder(url.searchParams.get('path') ?? '');
-      const name = cleanProjectName(url.searchParams.get('name') ?? '');
+      const name = cleanProjectName(newNameParam(url) ?? '');
       if (!name) throw new HttpError(400, 'invalid name');
       const to = folder.includes('/') ? `${folder.slice(0, folder.lastIndexOf('/'))}/${name}` : name;
       if (existsSync(dirOf(to))) throw new HttpError(409, 'that name is taken');

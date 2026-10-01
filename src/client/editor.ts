@@ -28,7 +28,9 @@ interface PeerState {
 
 export async function renderEditor(app: HTMLElement, project: string, meInfo: Me): Promise<void> {
   const access = meInfo.access;
-  const projectName = project.split('/').pop()!;
+  // `project` changes when the project is renamed from here or elsewhere
+  // (followMove); everything reads it at the time of use.
+  let projectName = project.split('/').pop()!;
   document.title = `${projectName} — TeXWerk`;
   let readOnly = false;
   const doc = new Y.Doc();
@@ -66,10 +68,11 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
     paneToggle.textContent = showing ? 'Editor' : 'PDF';
   });
   const roBadge = h('span', { class: 'readonly-badge', title: 'You have view-only access to this project', hidden: true }, 'view only');
+  const titleEl = h('span', { class: 'title', title: project }, projectName);
   const toolbar = h('div', { class: 'toolbar' },
     brand,
     h('span', { class: 'sep' }),
-    h('span', { class: 'title', title: project }, projectName),
+    titleEl,
     roBadge,
     h('span', { class: 'group' }, compileBtn, compileMore),
     h('span', { class: 'spacer' }),
@@ -142,14 +145,14 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
   const editorPane = h('div', { class: 'pane' }, editorHead, editorHost);
 
   const tree = new FileTree({
-    project, texts, bins, dirs,
+    project: () => project, texts, bins, dirs,
     onOpen: (path) => openFile(path),
     setStatus,
     getMainFile: () => settings.mainFile,
     setMainFile: (path) => void saveSettings({ mainFile: path }),
   });
   const viewer = new Viewer({
-    project,
+    project: () => project,
     onJumpToSource: (file, line) => openFile(file, line),
     onCloseFile: () => tree.setViewing(null),
     onSyncFromCursor: () => void syncToPdf(),
@@ -161,7 +164,7 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
   let pinsTimer: number | undefined;
   let pinsRequest = 0;
   const comments = new Comments({
-    project,
+    project: () => project,
     doc,
     me: () => me,
     canModerate: () => meInfo.admin,
@@ -237,12 +240,15 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
   }
 
   // ------------------------------------------------------------ connection
-  const wsUrl = new URL(withName(`/ws?project=${encodeURIComponent(project)}`), location.href);
-  wsUrl.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const wsUrl = () => {
+    const url = new URL(withName(`/ws?project=${encodeURIComponent(project)}`), location.href);
+    url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return url.href;
+  };
   let synced = false;
   let pendingOpen: string | null = new URLSearchParams(location.search).get('file');
   const provider = new Provider({
-    url: wsUrl.href,
+    url: wsUrl(),
     doc,
     awareness,
     onStatus: (status, detail) => {
@@ -295,6 +301,8 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
       if (historyView) scheduleHistoryRefresh();
     } else if (event.t === 'renamed') {
       if (currentPath === event.from) setTimeout(() => openFile(event.to), 30);
+    } else if (event.t === 'moved') {
+      followMove(event.to);
     } else if (event.t === 'notice') {
       toast(event.message);
     }
@@ -303,6 +311,7 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
   /** View-only access: nothing on screen may look like it changes the project. */
   function applyReadOnly(): void {
     roBadge.hidden = !readOnly;
+    updateTitleAffordance();
     for (const b of [compileMore, labelBtn, gitBtn, agentBtn]) b.hidden = readOnly;
     tree.setReadOnly(readOnly);
     if (currentPath) {
@@ -313,6 +322,75 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
   }
 
   shareBtn.addEventListener('click', () => showShareDialog(project, meInfo));
+
+  // ------------------------------------------------------------ renaming
+  /**
+   * The project now lives at `to` — renamed from this tab or another. The
+   * server closes our socket once the folder has moved; pointing the provider
+   * at the new id first makes the reconnect resume the same document.
+   */
+  function followMove(to: string): void {
+    if (to === project) return;
+    project = to;
+    projectName = to.split('/').pop()!;
+    if (!titleEl.querySelector('input')) titleEl.textContent = projectName;
+    document.title = `${projectName} — TeXWerk`;
+    const params = new URLSearchParams(location.search);
+    params.set('project', to);
+    history.replaceState(history.state, '', `${location.pathname}?${params}`);
+    provider.setUrl(wsUrl());
+  }
+
+  // Click the name to rename the project in place. Only the owner may (the
+  // server checks too); a view-only person or a non-owner just sees the name.
+  let canRename = !access;
+  const updateTitleAffordance = () => {
+    titleEl.classList.toggle('editable', canRename && !readOnly);
+    titleEl.title = canRename && !readOnly ? `${project} — click to rename` : project;
+  };
+  if (access) {
+    void api<{ canManage?: boolean }>('GET', `/api/access?project=${encodeURIComponent(project)}`)
+      .then((r) => { canRename = Boolean(r.canManage); updateTitleAffordance(); }, () => {});
+  }
+  updateTitleAffordance();
+  titleEl.addEventListener('click', () => {
+    if (!canRename || readOnly || titleEl.querySelector('input')) return;
+    const input = h('input', { class: 'title-input', value: projectName, spellcheck: 'false', maxlength: '120', 'aria-label': 'Project name' });
+    // As wide as the name, so the toolbar does not jump while typing.
+    const fit = () => { input.style.width = `${Math.max(8, input.value.length + 2)}ch`; };
+    fit();
+    titleEl.replaceChildren(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const finish = async (commit: boolean) => {
+      if (done) return;
+      done = true;
+      const name = input.value.trim();
+      if (commit && name && name !== projectName) {
+        input.disabled = true;
+        setStatus('Renaming…');
+        try {
+          const r = await api<{ id: string }>('POST', `/api/projects/rename?project=${encodeURIComponent(project)}&newName=${encodeURIComponent(name)}`);
+          followMove(r.id);
+          toast(`Renamed to ${projectName}`, 'ok');
+        } catch (err) {
+          toast((err as Error).message, 'bad');
+        } finally {
+          setStatus(null);
+        }
+      }
+      titleEl.replaceChildren(projectName);
+      updateTitleAffordance();
+    };
+    input.addEventListener('input', fit);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); void finish(true); }
+      else if (e.key === 'Escape') { e.preventDefault(); void finish(false); }
+      e.stopPropagation();
+    });
+    input.addEventListener('blur', () => void finish(true));
+  });
 
   // ------------------------------------------------------------ files
   function showPlaceholder(): void {
@@ -537,7 +615,7 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
 
   function openHistory(): void {
     if (historyView) { closeHistory(); return; }
-    historyView = new HistoryView({ project, onClose: closeHistory, onLabel: openLabelDialog });
+    historyView = new HistoryView({ project: () => project, onClose: closeHistory, onLabel: openLabelDialog });
     editorPane.style.display = 'none';
     rightSplit.style.display = 'none';
     viewer.root.style.display = 'none';

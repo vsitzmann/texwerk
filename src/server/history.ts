@@ -91,8 +91,21 @@ export class History {
     }
   }
 
-  /** Called periodically; `force` records everything pending (labels, shutdown). */
-  async flush(force = false): Promise<void> {
+  private flushChain: Promise<void> = Promise.resolve();
+
+  /**
+   * Called periodically; `force` records everything pending (labels,
+   * shutdown). Flushes run one after another, so a forced one at close also
+   * waits for a periodic one still writing — nothing lands after the project
+   * is closed (and its folder possibly renamed).
+   */
+  flush(force = false): Promise<void> {
+    const run = this.flushChain.then(() => this.flushDue(force));
+    this.flushChain = run.catch(() => {});
+    return run;
+  }
+
+  private async flushDue(force: boolean): Promise<void> {
     const now = Date.now();
     const due: Array<[string, Pending]> = [];
     for (const [path, p] of this.pending) {

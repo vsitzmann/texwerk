@@ -129,6 +129,19 @@ code { color: var(--cyan); }
   white-space: nowrap;
   font-weight: 600;
 }
+.toolbar .title.editable {
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  cursor: text;
+}
+.toolbar .title.editable:hover { border-color: var(--line); background: var(--panel-2); }
+.toolbar .title:has(.title-input) { overflow: visible; padding: 0; border: 0; }
+.toolbar input.title-input {
+  max-width: 40vw;
+  min-width: 12ch;
+  padding: 2px 6px;
+  font-weight: 600;
+}
 .toolbar .group { display: flex; gap: 0; }
 .toolbar .group > button + button { border-left: 0; }
 
