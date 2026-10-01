@@ -1,4 +1,4 @@
-import { EditorState, type Extension } from '@codemirror/state';
+import { Compartment, EditorState, type Extension } from '@codemirror/state';
 import {
   EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection,
   dropCursor, rectangularSelection, crosshairCursor, highlightSpecialChars, Decoration, type DecorationSet,
@@ -7,7 +7,7 @@ import {
 import { RangeSet, StateEffect, StateField, type EditorState as State } from '@codemirror/state';
 import { defaultKeymap, indentWithTab } from '@codemirror/commands';
 import { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
-import { autocompletion, closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete';
+import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete';
 import {
   StreamLanguage, HighlightStyle, syntaxHighlighting, bracketMatching, indentOnInput, foldGutter, foldKeymap,
 } from '@codemirror/language';
@@ -15,8 +15,10 @@ import { stex } from '@codemirror/legacy-modes/mode/stex';
 import { tags as t } from '@lezer/highlight';
 import * as Y from 'yjs';
 import { yCollab, yUndoManagerKeymap } from 'y-codemirror.next';
+import { vim, Vim, CodeMirror as VimCM } from '@replit/codemirror-vim';
 import type { Awareness } from 'y-protocols/awareness';
 import { extensionOf } from '@shared/files.ts';
+import { latexSupport, type LatexProject } from './latex.ts';
 
 /**
  * A CodeMirror view bound to one Y.Text. Remote carets and selections come
@@ -38,26 +40,6 @@ const tokyo = HighlightStyle.define([
   { tag: [t.operator], color: '#89ddff' },
   { tag: [t.invalid], color: '#f7768e' },
 ]);
-
-const LATEX_COMMANDS = [
-  'section', 'subsection', 'subsubsection', 'paragraph', 'chapter', 'part', 'label', 'ref', 'eqref', 'cref', 'Cref',
-  'cite', 'citep', 'citet', 'emph', 'textbf', 'textit', 'texttt', 'underline', 'footnote', 'caption', 'includegraphics',
-  'begin', 'end', 'item', 'usepackage', 'newcommand', 'renewcommand', 'input', 'include', 'bibliography',
-  'bibliographystyle', 'maketitle', 'tableofcontents', 'centering', 'frac', 'sum', 'int', 'left', 'right',
-  'mathbf', 'mathrm', 'mathcal', 'mathbb', 'hline', 'vspace', 'hspace', 'url', 'href', 'todo', 'autoref',
-];
-const ENVIRONMENTS = ['figure', 'table', 'equation', 'align', 'itemize', 'enumerate', 'tabular', 'center', 'abstract', 'document', 'minipage', 'description', 'verbatim', 'theorem', 'proof', 'lemma'];
-
-function latexCompletions(context: import('@codemirror/autocomplete').CompletionContext) {
-  const env = context.matchBefore(/\\begin\{\w*/);
-  if (env) {
-    const from = env.from + env.text.indexOf('{') + 1;
-    return { from, options: ENVIRONMENTS.map((e) => ({ label: e, type: 'type' })) };
-  }
-  const word = context.matchBefore(/\\[a-zA-Z]*/);
-  if (!word || (word.from === word.to && !context.explicit)) return null;
-  return { from: word.from + 1, options: LATEX_COMMANDS.map((c) => ({ label: c, type: 'keyword' })) };
-}
 
 // Flash a line after a jump (from the log, SyncTeX, or following someone).
 const flashEffect = StateEffect.define<number>();
@@ -215,6 +197,17 @@ const authorsField = StateField.define<DecorationSet>({
   provide: (f) => EditorView.decorations.from(f),
 });
 
+// ------------------------------------------------------------ vim
+
+// Vim's u / Ctrl-R go through CodeMirror's own history, which the editor
+// doesn't have: undo is the Y.UndoManager's (per person).
+const [yUndo, yRedo] = [yUndoManagerKeymap[0].run!, yUndoManagerKeymap[1].run!];
+VimCM.commands.undo = (cm: { cm6: EditorView }) => { yUndo(cm.cm6); };
+VimCM.commands.redo = (cm: { cm6: EditorView }) => { yRedo(cm.cm6); };
+// :w compiles, like Ctrl+S.
+const vimSave = new WeakMap<EditorView, () => void>();
+Vim.defineEx('write', 'w', (cm: { cm6: EditorView }) => vimSave.get(cm.cm6)?.());
+
 export interface CodeEditorOptions {
   path: string;
   ytext: Y.Text;
@@ -223,6 +216,10 @@ export interface CodeEditorOptions {
   onCompile: () => void;
   onSyncToPdf: () => void;
   readOnly?: boolean;
+  /** The rest of the project, for completing labels, citations and files. */
+  project?: Omit<LatexProject, 'path'>;
+  /** Vim keybindings. */
+  vim?: boolean;
   /** Start a comment on the selection. */
   onComment?: (from: number, to: number, rect: DOMRect) => void;
   /** Open the given thread(s), shown next to `rect`. */
@@ -233,17 +230,20 @@ export class CodeEditor {
   readonly view: EditorView;
   readonly path: string;
   private readonly undo: Y.UndoManager;
+  private readonly vimMode = new Compartment();
 
   constructor(parent: HTMLElement, opts: CodeEditorOptions) {
     this.path = opts.path;
     this.undo = new Y.UndoManager(opts.ytext);
     const ext = extensionOf(opts.path);
     const language: Extension[] = ['tex', 'sty', 'cls', 'ltx', 'bib', 'bbx', 'cbx', 'dtx', 'tikz'].includes(ext)
-      ? [StreamLanguage.define(stex), autocompletion({ override: [latexCompletions], icons: false })]
+      ? [StreamLanguage.define(stex), latexSupport({ path: opts.path, texts: () => [], files: () => [], ...opts.project })]
       : [];
     const state = EditorState.create({
       doc: opts.ytext.toString(),
       extensions: [
+        // Vim goes before every other keymap.
+        this.vimMode.of(opts.vim ? vim({ status: true }) : []),
         lineNumbers(),
         foldGutter(),
         highlightSpecialChars(),
@@ -301,6 +301,7 @@ export class CodeEditor {
       ],
     });
     this.view = new EditorView({ state, parent });
+    vimSave.set(this.view, opts.onCompile);
     this.onComment = opts.onComment;
     // Gutter markers sit outside the content DOM that CodeMirror's own
     // handlers cover, so listen on the whole editor.
@@ -320,6 +321,10 @@ export class CodeEditor {
     const coords = this.view.coordsAtPos(sel.to) ?? this.view.coordsAtPos(sel.from);
     const rect = coords ? new DOMRect(coords.left, coords.top, 1, coords.bottom - coords.top) : this.view.dom.getBoundingClientRect();
     this.onComment(sel.from, sel.to, rect);
+  }
+
+  setVim(on: boolean): void {
+    this.view.dispatch({ effects: this.vimMode.reconfigure(on ? vim({ status: true }) : []) });
   }
 
   /** Colour the text by author; null turns the view off. */

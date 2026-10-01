@@ -216,3 +216,22 @@ test('BibTeX errors are reported against the line that caused them', async () =>
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('LaTeX: an environment knows whether it is closed, and which one is open', async () => {
+  const { findEnd, openEnvAt } = await import('../src/client/latex.ts');
+  const doc = '\\begin{document}\n\\begin{itemize}\n\\item a\n\\end{itemize}\n\\end{document}\n';
+  const after = (s: string) => doc.indexOf(s) + s.length;
+  assert.equal(findEnd(doc, after('\\begin{itemize}'), 'itemize').closed, true);
+  // A new \begin inside the list has no \end yet.
+  const added = doc.replace('\\item a\n', '\\item a\n\\begin{enumerate}\n');
+  assert.equal(findEnd(added, added.indexOf('\\begin{enumerate}') + 17, 'enumerate').closed, false);
+  // Renamed \begin: balanced, so closed, and its old \end is reported.
+  const renamed = doc.replace('\\begin{itemize}', '\\begin{enumerate}');
+  const r = findEnd(renamed, renamed.indexOf('\\begin{enumerate}') + 17, 'enumerate');
+  assert.equal(r.closed, true);
+  assert.equal(r.stale?.name, 'itemize');
+  assert.equal(openEnvAt(doc, doc.indexOf('\\item'))?.name, 'itemize');
+  assert.equal(openEnvAt(doc, after('\\end{itemize}'))?.name, 'document');
+  // Commented-out environments don't count.
+  assert.equal(openEnvAt('% \\begin{itemize}\nx', 19), null);
+});

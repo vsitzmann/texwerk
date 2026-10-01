@@ -126,6 +126,17 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
         `${name} ${Math.round(s.chars / total * 100)}%`)));
   }
   doc.getMap('text').observeDeep(() => scheduleAuthors());
+  // Vim keybindings, per browser.
+  let vimOn = false;
+  try { vimOn = localStorage.getItem('texwerk-vim') === '1'; } catch { /* default off */ }
+  const vimBtn = h('button', { class: `ghost icon authors-toggle${vimOn ? ' on' : ''}`, title: 'Vim keybindings (:w compiles)' }, 'Vim');
+  vimBtn.addEventListener('click', () => {
+    vimOn = !vimOn;
+    vimBtn.classList.toggle('on', vimOn);
+    try { localStorage.setItem('texwerk-vim', vimOn ? '1' : '0'); } catch { /* ignore */ }
+    current?.setVim(vimOn);
+    current?.view.focus();
+  });
   authorsMap.observe(() => scheduleAuthors());
   const editorHost = h('div', { class: 'editor-host' });
   const editorPane = h('div', { class: 'pane' }, editorHead, editorHost);
@@ -336,6 +347,11 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
         ytext,
         readOnly,
         awareness,
+        vim: vimOn,
+        project: {
+          texts: () => [...texts.entries()].map(([p, t]) => [p, () => t.toString()] as [string, () => string]),
+          files: () => [...texts.keys(), ...bins.keys()],
+        },
         onCursor: (l, c) => { statusCursor.textContent = `Ln ${l}, Col ${c}`; },
         onCompile: () => void runCompile(),
         onSyncToPdf: () => void syncToPdf(),
@@ -355,7 +371,8 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
         isMain ? h('span', { class: 'main-badge', style: 'color:var(--yellow);font-size:9.5px' }, 'MAIN') : '',
         h('span', { class: 'spacer' }),
         authorsLegend,
-        authorsBtn);
+        authorsBtn,
+        vimBtn);
       updateAuthors();
       tree.select(path);
       const url = new URL(location.href);

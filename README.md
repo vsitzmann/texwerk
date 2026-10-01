@@ -27,6 +27,16 @@ No accounts. On a tailnet with `--access`, your tailnet login is your identity.
   its edits are attributed to "*you* · agent" in the history. Compile results
   are mirrored to `.texwerk/output.pdf` / `.texwerk/output.log`, and
   `node .texwerk/tw compile` compiles on the server and prints the errors.
+- **LaTeX help while typing.** Enter after `\begin{itemize}` closes the
+  environment and puts an `\item` inside; Enter on an item starts the next
+  one, and Enter on an empty last item leaves the list. Picking an
+  environment from the completion list inserts it whole, with Tab stops
+  (a figure gets placement, file, caption and label). `\ref{` lists the
+  project's labels, `\cite{` the keys of its .bib files, `\includegraphics{`
+  / `\input{` its files, and `\` the usual commands plus the project's own
+  `\newcommand`s. Renaming a `\begin{…}` from the list renames its `\end`.
+- **Vim keybindings**, switched on per browser with **Vim** above the editor.
+  `:w` compiles; `u` / `Ctrl+R` are the same per-person undo as `Ctrl+Z`.
 - **Full edit history.** Every version of every file is kept (coalesced into
   steps after 5 s of quiet or 1 minute of continuous editing). The History
   view groups changes by time and author, shows diffs, restores single files
@@ -134,6 +144,7 @@ discards it instead of merging, which would duplicate every document.
 ```bash
 npm test                                    # unit tests
 node test/e2e-bridge.ts <origin> <project> <mirrorDir>          # with a server and a running bridge
+node test/e2e-latex-editing.ts <origin> <projectsRoot>          # completion, Enter and vim in Chromium
 MODE=all node test/stress-bridge.ts <origin> <project> <mirrorDir> 8
 ```
 
