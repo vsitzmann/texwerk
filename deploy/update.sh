@@ -3,6 +3,7 @@
 #
 #   sudo ./deploy/update.sh            # refuses while someone is connected
 #   sudo ./deploy/update.sh --force    # restart anyway (open tabs reload by themselves)
+#   systemctl start texwerk-deploy     # same as --force, no sudo (see texwerk-deploy.service)
 #
 # Deploys what is committed (HEAD), never uncommitted work. The server
 # persists every open project on SIGTERM; browser tabs and mirror bridges
@@ -10,7 +11,7 @@
 set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo "run with sudo"; exit 1; }
 HERE=$(cd "$(dirname "$0")" && pwd)
-SRC=$(cd "$HERE/.." && pwd)
+SRC=${TEXWERK_SRC:-$(cd "$HERE/.." && pwd)}
 APP=/srv/texwerk/app
 PORT=5810
 restart=1 force=0
@@ -24,10 +25,14 @@ if [[ $restart == 1 && $force == 0 ]] && ss -H -tn state established "( sport = 
   echo "someone is connected to TeXWerk right now; re-run later or with --force"; exit 1
 fi
 
-rev=$(git -C "$SRC" rev-parse HEAD)
+# Read the checkout as its owner: as root, git refuses a repository someone
+# else owns, and could run hooks configured in it.
+owner=$(stat -c %U "$SRC")
+as_owner() { runuser -u "$owner" -- "$@"; }
+rev=$(as_owner git -C "$SRC" rev-parse HEAD)
 echo "== deploying ${rev:0:7} from $SRC"
 tmp=$(mktemp -d)
-git -C "$SRC" archive --format=tar HEAD | tar -x -C "$tmp"
+as_owner git -C "$SRC" archive --format=tar HEAD | tar -x -C "$tmp"
 install -d -o texwerk -g texwerk -m 0755 "$APP"
 lock_changed=1
 [[ -f $APP/package-lock.json ]] && cmp -s "$tmp/package-lock.json" "$APP/package-lock.json" && lock_changed=0
