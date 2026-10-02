@@ -16,6 +16,7 @@ import {
 } from '../shared/protocol.ts';
 import { setYText } from '../shared/textDiff.ts';
 import { allThreads, type CommentMessage, type CommentThread, type ThreadMap } from '../shared/comments.ts';
+import { chatArray, cleanMessage, findMentions, fromJsonl, toJsonl, type ChatMessage, type ChatRef } from '../shared/chat.ts';
 import { authorRuns } from '../shared/provenance.ts';
 import { BUILD_DIR, runLatexmk } from './compile.ts';
 import { ensureRepo } from './git.ts';
@@ -74,6 +75,7 @@ export class Project {
   readonly texts: Y.Map<Y.Text>;
   readonly bins: Y.Map<BinInfo>;
   readonly comments: Y.Map<ThreadMap>;
+  readonly chat: Y.Array<ChatMessage>;
   readonly authors: Y.Map<AuthorInfo>;
   /** The server's own client id, and the ids it writes under for each author (see transactAs). */
   private readonly homeClient: number;
@@ -109,6 +111,7 @@ export class Project {
     this.texts = this.doc.getMap('text');
     this.bins = this.doc.getMap('bin');
     this.comments = this.doc.getMap('comments');
+    this.chat = chatArray(this.doc);
     this.authors = this.doc.getMap('authors');
     this.homeClient = this.doc.clientID;
     this.dirs = this.doc.getMap('dirs');
@@ -171,6 +174,7 @@ export class Project {
     }
     await this.restoreLastCompile();
     await this.loadComments();
+    await this.loadChat();
 
     this.doc.on('update', (update: Uint8Array, origin: unknown) => {
       this.broadcastUpdate(update, origin);
@@ -181,6 +185,10 @@ export class Project {
     this.awareness.on('update', (changes: { added: number[]; updated: number[]; removed: number[] }, origin: unknown) =>
       this.onAwareness(changes, origin));
     this.comments.observeDeep(() => this.scheduleCommentSave(300));
+    this.chat.observe(() => {
+      this.scheduleChatSave(300);
+      for (const wake of this.chatWaiters.splice(0)) wake();
+    });
     this.startWatcher();
     this.flushTimer = setInterval(() => { void this.history.flush(); }, 1000);
     this.scheduleUnload();
@@ -959,6 +967,73 @@ export class Project {
     }, { author: login });
   }
 
+  // ---------------------------------------------------------------- chat
+
+  private chatSaveTimer: NodeJS.Timeout | null = null;
+  private readonly chatWaiters: Array<() => void> = [];
+
+  private chatFile(): string {
+    return join(this.dir, '.texwerk', 'chat.jsonl');
+  }
+
+  private scheduleChatSave(delay: number): void {
+    if (this.chatSaveTimer) return;
+    this.chatSaveTimer = setTimeout(() => {
+      this.chatSaveTimer = null;
+      this.saveChat();
+    }, delay);
+  }
+
+  /** chat.jsonl: one message per line, oldest first. */
+  saveChat(): void {
+    if (this.chatSaveTimer) { clearTimeout(this.chatSaveTimer); this.chatSaveTimer = null; }
+    if (!this.chat.length && !existsSync(this.chatFile())) return;
+    mkdirSync(join(this.dir, '.texwerk'), { recursive: true });
+    const tmp = `${this.chatFile()}.${process.pid}.tmp`;
+    writeFileSync(tmp, toJsonl(this.chat.toArray()));
+    renameSync(tmp, this.chatFile());
+  }
+
+  /**
+   * The chat from chat.jsonl. The saved document normally has it already;
+   * the file wins when they differ (it was restored, copied in or edited).
+   */
+  async loadChat(): Promise<void> {
+    if (!existsSync(this.chatFile())) return;
+    let messages: ChatMessage[];
+    try {
+      messages = fromJsonl(await readFile(this.chatFile(), 'utf8'));
+    } catch (err) {
+      console.error(`[${this.name}] chat.jsonl unreadable, keeping the current chat:`, (err as Error).message);
+      return;
+    }
+    const current = this.chat.toArray();
+    if (current.length === messages.length && current.every((m, i) => m.id === messages[i].id)) return;
+    this.doc.transact(() => {
+      this.chat.delete(0, this.chat.length);
+      this.chat.push(messages);
+    }, { author: 'disk' });
+  }
+
+  /** Post a message; `names` are the people it may mention (everyone present). */
+  say(text: string, who: { author: string; login: string; agent: boolean }, names: string[], ref?: ChatRef): ChatMessage {
+    const m = cleanMessage({
+      id: randomUUID().slice(0, 8), author: who.author, login: who.login, agent: who.agent, ts: Date.now(), text,
+      mentions: findMentions(text, names), ref,
+    })!;
+    this.doc.transact(() => this.chat.push([m]), { author: who.author });
+    return m;
+  }
+
+  /** Resolves on the next chat message, or after `ms`. */
+  waitChat(ms: number): Promise<void> {
+    return new Promise((done) => {
+      const timer = setTimeout(() => { const i = this.chatWaiters.indexOf(wake); if (i >= 0) this.chatWaiters.splice(i, 1); done(); }, ms);
+      const wake = () => { clearTimeout(timer); done(); };
+      this.chatWaiters.push(wake);
+    });
+  }
+
   private closed = false;
 
   /**
@@ -979,6 +1054,8 @@ export class Project {
     if (this.unloadTimer) clearTimeout(this.unloadTimer);
     await this.persistAll();
     this.saveComments();
+    this.saveChat();
+    for (const wake of this.chatWaiters.splice(0)) wake();
     this.saveDoc();
     await this.history.flush(true);
     if (closeConns) for (const c of this.conns) c.ws.close(1001, 'server shutting down');

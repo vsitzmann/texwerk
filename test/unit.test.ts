@@ -298,6 +298,138 @@ test('renaming an open project moves everyone in it, edits made during the move 
   }
 });
 
+test('chat: mentions, refs and the jsonl round trip', async () => {
+  const { findMentions, fromJsonl, toJsonl, parseRef, messagesSince, chatMarkdown, mentionsName } = await import('../src/shared/chat.ts');
+  assert.deepEqual(findMentions('@Ann Lee and @agent, see this; mail@example.com', ['Ann', 'Ann Lee', 'Bob']).sort(), ['agent', 'ann lee']);
+  assert.deepEqual(findMentions('@all: done. @agents is no mention', []), ['all']);
+  assert.deepEqual(findMentions('@Bobby', ['Bob']), [], 'a name must end where the mention ends');
+  assert.deepEqual(parseRef('sections/intro.tex:12'), { file: 'sections/intro.tex', line: 12 });
+  assert.deepEqual(parseRef('comment:ab12cd34'), { commentId: 'ab12cd34' });
+  assert.equal(parseRef('main.tex'), null);
+  const messages = [
+    { id: 'a1', author: 'Ann', login: 'ann@x', agent: false, ts: 1000, text: 'Hi @agent,\nshorten this', mentions: ['agent'], ref: { file: 'main.tex', line: 3 } },
+    { id: 'b2', author: 'Ann · agent', login: 'ann@x', agent: true, ts: 2000, text: 'Done.', mentions: [], ref: { commentId: 'c3' } },
+    { id: 'c3', author: 'Bob', agent: false, ts: 3000, text: '{"json": "inside"}', mentions: ['everyone'] },
+  ];
+  const jsonl = toJsonl(messages);
+  assert.equal(jsonl.split('\n').filter(Boolean).length, 3);
+  assert.deepEqual(fromJsonl(jsonl), messages);
+  // A torn last line or a merge marker costs only that line.
+  assert.deepEqual(fromJsonl(`${jsonl}<<<<<<< HEAD\n{"id":"x","te`), messages);
+  assert.deepEqual(messagesSince(messages, 'a1').map((m) => m.id), ['b2', 'c3']);
+  assert.deepEqual(messagesSince(messages, 'c3'), []);
+  assert.equal(messagesSince(messages, 'nope').length, 3);
+  assert.ok(mentionsName(messages[2], 'Ann'), '@everyone reaches everyone');
+  assert.ok(!mentionsName(messages[1], 'Ann'));
+  const md = chatMarkdown('Paper', messages, 2);
+  assert.ok(md.includes('3 message(s), the newest 2 shown'));
+  assert.ok(!md.includes('[a1]') && md.includes('[b2]') && md.includes('Ann · agent: Done. [→ comment c3]'));
+});
+
+test('chat is saved to chat.jsonl, restored on open, and committed with labels', async () => {
+  const { mkdir } = await import('node:fs/promises');
+  const { Project } = await import('../src/server/project.ts');
+  const { chatArray } = await import('../src/shared/chat.ts');
+  const root = await mkdtemp(join(tmpdir(), 'texwerk-chat-'));
+  const dir = join(root, 'Paper');
+  await mkdir(dir);
+  await writeFile(join(dir, 'main.tex'), 'Hello.\n');
+  try {
+    const p = new Project('Paper', dir);
+    await p.open();
+    const m = p.say('Please look at @agent', { author: 'Ann', login: 'ann@x', agent: false }, ['Ann'], { file: 'main.tex', line: 1 });
+    assert.deepEqual(m.mentions, ['agent']);
+    const woken = p.waitChat(5000);
+    p.say('On it.', { author: 'Ann · agent', login: 'ann@x', agent: true }, []);
+    await woken;
+    await p.close();
+    const saved = (await readFile(join(dir, '.texwerk', 'chat.jsonl'), 'utf8')).split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.deepEqual(saved.map((x) => x.text), ['Please look at @agent', 'On it.']);
+    assert.equal(saved[1].agent, true);
+    assert.deepEqual(saved[0].ref, { file: 'main.tex', line: 1 });
+
+    // Without the saved document, the chat comes back from the file.
+    await rm(join(dir, '.texwerk', 'ydoc.bin'), { force: true });
+    const q = new Project('Paper', dir);
+    await q.open();
+    assert.deepEqual(chatArray(q.doc).toArray().map((x) => x.id), saved.map((x) => x.id));
+    // A chat.jsonl changed while the server was down wins over the saved document.
+    await q.close();
+    await writeFile(join(dir, '.texwerk', 'chat.jsonl'), `${JSON.stringify(saved[0])}\n`);
+    const r = new Project('Paper', dir);
+    await r.open();
+    assert.deepEqual(chatArray(r.doc).toArray().map((x) => x.text), ['Please look at @agent']);
+    r.saveChat();
+    const c = await commitAll(dir, 'With chat', 'Ann', 'ann@x', -1);
+    assert.ok(c.ok, c.output);
+    const { execFileSync } = await import('node:child_process');
+    assert.ok(execFileSync('git', ['-C', dir, 'show', '--name-only', '--format=', 'HEAD'], { encoding: 'utf8' }).includes('.texwerk/chat.jsonl'));
+    await r.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('agents chat through the mirror: tw say, tw chat, tw chat --wait, chat.md', async () => {
+  const { mkdir } = await import('node:fs/promises');
+  const { spawn, execFile } = await import('node:child_process');
+  const { startServer } = await import('../src/server/server.ts');
+  const root = await mkdtemp(join(tmpdir(), 'texwerk-chatbridge-'));
+  const mirror = join(root, 'mirror');
+  await mkdir(join(root, 'projects', 'Paper'), { recursive: true });
+  await writeFile(join(root, 'projects', 'Paper', 'main.tex'), 'Hello.\n');
+  const port = 20000 + Math.floor(Math.random() * 20000);
+  const origin = `http://127.0.0.1:${port}`;
+  const server = await startServer({ rootDir: join(root, 'projects'), clientDir: null, bridgeFile: null, port, host: '127.0.0.1', access: null });
+  const bridge = spawn(process.execPath, [join(import.meta.dirname, '../src/bridge/connect.ts'), `${origin}/?project=Paper&name=Ann`, mirror], { stdio: 'ignore' });
+  const tw = (...args: string[]) => new Promise<string>((done, fail) =>
+    execFile(process.execPath, [join(mirror, '.texwerk', 'tw'), ...args], (err, out, errOut) => (err ? fail(new Error(`${err.message}\n${errOut}`)) : done(out))));
+  const until = async (what: string, check: () => Promise<boolean> | boolean, ms = 8000) => {
+    const start = Date.now();
+    while (!await check()) {
+      if (Date.now() - start > ms) throw new Error(`timed out: ${what}`);
+      await new Promise((r) => setTimeout(r, 25));
+    }
+  };
+  const chatMd = () => readFile(join(mirror, '.texwerk', 'chat.md'), 'utf8').catch(() => '');
+  const human = (text: string) => fetch(`${origin}/api/chat?project=Paper&name=Bob`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }) });
+  try {
+    await until('mirror ready', async () => (await chatMd()).startsWith('# Chat in Paper'));
+    assert.match(await tw('say', 'Fixed the intro', '--ref', 'main.tex:1'), /^sent \w+/);
+    const listed = await tw('chat');
+    assert.match(listed, /Ann · agent: Fixed the intro \[→ main\.tex:1\]/);
+    await until('chat.md follows', async () => (await chatMd()).includes('Ann · agent: Fixed the intro'));
+    const saved = (await (await fetch(`${origin}/api/chat?project=Paper&name=Bob`)).json()) as { messages: Array<{ agent: boolean; login?: string; ref?: unknown }> };
+    assert.equal(saved.messages[0].agent, true);
+    assert.deepEqual(saved.messages[0].ref, { file: 'main.tex', line: 1 });
+
+    // --wait skips messages that are not for the agent, and returns on @agent.
+    let waited = '';
+    const waiting = tw('chat', '--wait').then((out) => { waited = out; });
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal((await human('just chatting')).status, 200);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(waited, '', 'a message without @agent does not wake it');
+    await human('@agent please shorten the abstract');
+    await waiting;
+    assert.match(waited, /Bob: @agent please shorten the abstract/);
+    assert.ok(!waited.includes('just chatting'));
+    // --all: any message by a person.
+    const any = tw('chat', '--wait', '--all');
+    await new Promise((r) => setTimeout(r, 200));
+    await human('hello');
+    assert.match(await any, /Bob: hello/);
+    const first = saved.messages[0] as unknown as { id: string };
+    const after = await tw('chat', '--since', first.id);
+    assert.ok(!after.includes('Fixed the intro') && after.includes('Bob: hello'));
+  } finally {
+    bridge.kill('SIGTERM');
+    await new Promise((r) => bridge.once('exit', r));
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('typing a closing bracket steps over an existing one only when balanced', async () => {
   const { shouldStepOver } = await import('../src/client/latex.ts');
   assert.equal(shouldStepOver('\\textbf{word}', 12, '}'), true);

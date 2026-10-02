@@ -16,6 +16,7 @@ import {
 import { Project, type Conn } from './project.ts';
 import { readZip, writeZip } from './zip.ts';
 import { allThreads, commentsMarkdown, sortThreads } from '../shared/comments.ts';
+import { messagesSince, parseRef, type ChatRef } from '../shared/chat.ts';
 import { annotatePdf, pdfPosition } from './pdfComments.ts';
 
 /**
@@ -612,7 +613,7 @@ export async function startServer(options: ServerOptions) {
     const role = await requireRole(identity, projectParam ?? '', 'view');
     const project = await getProject(projectParam);
     // Commenting is open to viewers, like "commenter" in Google Docs.
-    const reads = method === 'GET' || ['/api/compile', '/api/synctex/edit', '/api/synctex/view', '/api/synctex/lines', '/api/comments'].includes(path);
+    const reads = method === 'GET' || ['/api/compile', '/api/synctex/edit', '/api/synctex/view', '/api/synctex/lines', '/api/comments', '/api/chat'].includes(path);
     if (!reads && role === 'view') throw new HttpError(403, 'you have view-only access to this project');
     const bodyPath = (p: unknown) => {
       const clean = cleanPath(String(p ?? ''));
@@ -746,6 +747,38 @@ export async function startServer(options: ServerOptions) {
       return json(response, 200, { ok: true });
     }
 
+    if (path === '/api/chat' && method === 'GET') {
+      // ?since=<id> for what came after it; &wait=1 holds the request until
+      // there is something (or ~25 s pass), for `tw chat --wait`.
+      const since = url.searchParams.get('since');
+      let messages = messagesSince(project.chat.toArray(), since);
+      if (url.searchParams.get('wait') === '1' && since && !messages.length) {
+        const gone = new Promise<void>((done) => response.once('close', () => done()));
+        await Promise.race([project.waitChat(25_000), gone]);
+        messages = messagesSince(project.chat.toArray(), since);
+      }
+      return json(response, 200, { messages });
+    }
+
+    if (path === '/api/chat' && method === 'POST') {
+      const body = await readJson<{ text?: string; mentions?: string[]; ref?: unknown }>(request);
+      const text = String(body.text ?? '').trim().slice(0, 20_000);
+      if (!text) throw new HttpError(400, 'empty message');
+      // Anyone here, and anyone the sender picked from the list, can be mentioned.
+      const names = [...[...project.conns].map((c) => c.identity.name), ...(Array.isArray(body.mentions) ? body.mentions.map(String) : [])];
+      let ref: ChatRef | undefined;
+      if (typeof body.ref === 'string') {
+        ref = parseRef(body.ref) ?? undefined;
+        if (!ref) throw new HttpError(400, 'a ref is file:line or comment:<id>');
+      } else if (body.ref && typeof body.ref === 'object') {
+        const r = body.ref as { file?: unknown; line?: unknown; commentId?: unknown };
+        if (typeof r.commentId === 'string') ref = { commentId: r.commentId };
+        else if (typeof r.file === 'string' && Number(r.line) > 0) ref = { file: bodyPath(r.file), line: Number(r.line) };
+      }
+      const message = project.say(text, { author: who, login: identity.login, agent: bridge }, names, ref);
+      return json(response, 200, { message });
+    }
+
     if (path === '/api/synctex/lines' && method === 'POST') {
       const body = await readJson<{ items: Array<{ file: string; line: number }> }>(request);
       const results = [];
@@ -787,6 +820,8 @@ export async function startServer(options: ServerOptions) {
       const message = String(body.message ?? '').trim().slice(0, 200);
       if (!message) throw new HttpError(400, 'a label needs a name');
       await project.persistAll();
+      project.saveComments();
+      project.saveChat();
       await project.history.flush(true);
       const r = await gitOps.commitAll(project.dir, message, identity.name, identity.login, project.history.lastId());
       project.broadcastEvent({ t: 'git' });
@@ -802,6 +837,7 @@ export async function startServer(options: ServerOptions) {
       if (!r.ok) return json(response, 500, { error: r.output });
       await project.reconcileAll(`${who} (revert)`);
       await project.loadComments();
+      project.saveChat(); // the chat is a log: a revert does not take it back
       await project.history.flush(true);
       const c = await gitOps.commitAll(project.dir, `Revert to "${body.message}"`, identity.name, identity.login, project.history.lastId());
       project.broadcastEvent({ t: 'git' });
@@ -843,6 +879,7 @@ export async function startServer(options: ServerOptions) {
       const r = await gitOps.pull(project.dir, identity.name, identity.login);
       await project.reconcileAll(`${who} (git pull)`);
       await project.loadComments();
+      project.saveChat();
       project.broadcastEvent({ t: 'git' });
       return json(response, r.ok ? 200 : 400, r.ok ? { output: r.output } : { error: r.output });
     }

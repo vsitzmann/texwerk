@@ -8,6 +8,7 @@ import { FileTree } from './tree.ts';
 import { HistoryView } from './historyView.ts';
 import { Viewer, type PdfPin } from './viewer.ts';
 import { Comments } from './comments.ts';
+import { Chat } from './chat.ts';
 import { authorRuns } from '@shared/provenance.ts';
 import type { AuthorInfo } from '@shared/protocol.ts';
 import type { CommentThread } from '@shared/comments.ts';
@@ -158,6 +159,7 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
     onSyncFromCursor: () => void syncToPdf(),
     onPinClick: (id, rect) => comments.openThread(id, rect),
     onPdfLoaded: () => schedulePins(0),
+    onTabChange: (tab) => { if (tab === 'chat') chat.shown(); },
   });
 
   // ------------------------------------------------------------ comments
@@ -176,6 +178,34 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
     },
   });
   viewer.setCommentsPanel(comments.panel, comments.openCount);
+
+  // ------------------------------------------------------------ chat
+  const chat = new Chat({
+    project: () => project,
+    doc,
+    me: () => me,
+    present: () => [...new Set([...(awareness.getStates() as Map<number, PeerState>).values()].map((s) => s.user?.name).filter((n): n is string => Boolean(n)))],
+    visible: () => viewer.activeTab === 'chat',
+    isFile: (path) => texts.has(path) || bins.has(path),
+    openRef: (ref) => {
+      if ('commentId' in ref) {
+        const t = comments.all().find((x) => x.id === ref.commentId);
+        if (!t) { toast('That comment no longer exists.'); return; }
+        viewer.showTab('comments');
+        comments.select(t.id);
+        revealThread(t);
+      } else if (texts.has(ref.file)) openFile(ref.file, ref.line);
+      else toast(`"${ref.file}" is not a text file in this project.`);
+    },
+    onChange: () => {
+      viewer.setChatPanel(chat.panel, chat.unread, chat.mentioned > 0);
+      updateDocumentTitle();
+    },
+  });
+  viewer.setChatPanel(chat.panel, chat.unread, chat.mentioned > 0);
+  function updateDocumentTitle(): void {
+    document.title = `${chat.titlePrefix}${projectName} — TeXWerk`;
+  }
 
   function updateEditorComments(): void {
     if (!current || !currentPath) return;
@@ -334,7 +364,7 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
     project = to;
     projectName = to.split('/').pop()!;
     if (!titleEl.querySelector('input')) titleEl.textContent = projectName;
-    document.title = `${projectName} — TeXWerk`;
+    updateDocumentTitle();
     const params = new URLSearchParams(location.search);
     params.set('project', to);
     history.replaceState(history.state, '', `${location.pathname}?${params}`);
@@ -780,7 +810,8 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
       h('ul', {},
         h('li', {}, 'Start Claude Code, Codex or any agent in that folder. Every save it makes reaches everyone here within a fraction of a second, merged character by character with what people are typing, and shows in History as ', h('b', {}, `${me.name} · agent`), '.'),
         h('li', {}, 'Or open the folder in your own editor (VS Code, Vim, Emacs…). Turn on auto-reload of changed files so collaborators\' edits appear in your buffer.'),
-        h('li', {}, 'The agent can compile and read the result: ', h('code', {}, 'node .texwerk/tw compile'), ' prints errors; the PDF lands in ', h('code', {}, '.texwerk/output.pdf'), '. Instructions are in ', h('code', {}, '.texwerk/AGENT.md'), '.')),
+        h('li', {}, 'The agent can compile and read the result: ', h('code', {}, 'node .texwerk/tw compile'), ' prints errors; the PDF lands in ', h('code', {}, '.texwerk/output.pdf'), '. Instructions are in ', h('code', {}, '.texwerk/AGENT.md'), '.'),
+        h('li', {}, 'Talk to it in the Chat tab: write ', h('code', {}, '@agent'), '. An agent waiting with ', h('code', {}, 'node .texwerk/tw chat --wait'), ' gets the message and answers with ', h('code', {}, 'tw say "…"'), '; it reads the conversation in ', h('code', {}, '.texwerk/chat.md'), '.')),
       h('p', { class: 'muted' }, 'Nothing runs on the server on your behalf. Ctrl+C stops the mirror; the folder stays.'),
       h('div', { class: 'actions' }, h('button', { onclick: close }, 'Close')),
     ], { wide: true });

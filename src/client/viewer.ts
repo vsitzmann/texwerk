@@ -14,7 +14,7 @@ pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
  * supports SyncTeX both ways.
  */
 
-type Tab = 'pdf' | 'log' | 'comments' | 'file';
+export type Tab = 'pdf' | 'log' | 'comments' | 'chat' | 'file';
 
 interface TextRun {
   str: string;
@@ -55,6 +55,8 @@ export interface ViewerOptions {
   onPinClick: (id: string, rect: DOMRect) => void;
   /** A new PDF finished loading (pins need fresh positions). */
   onPdfLoaded: () => void;
+  /** The visible tab changed (the chat marks itself read). */
+  onTabChange?: (tab: Tab) => void;
 }
 
 class PdfView {
@@ -343,6 +345,9 @@ export class Viewer {
   private lastPdfRev = -1;
   private commentsPanel: HTMLElement | null = null;
   private commentCount = 0;
+  private chatPanel: HTMLElement | null = null;
+  private chatUnread = 0;
+  private chatMentioned = false;
   private loadingPdf = false;
 
   constructor(opts: ViewerOptions) {
@@ -395,6 +400,19 @@ export class Viewer {
     }
   }
 
+  setChatPanel(panel: HTMLElement, unread: number, mentioned: boolean): void {
+    this.chatPanel = panel;
+    if (unread !== this.chatUnread || mentioned !== this.chatMentioned) {
+      this.chatUnread = unread;
+      this.chatMentioned = mentioned;
+      this.renderTabs();
+    }
+  }
+
+  get activeTab(): Tab {
+    return this.tab;
+  }
+
   showFile(path: string, hash: string): void {
     this.file = { path, hash };
     this.tab = 'file';
@@ -408,8 +426,10 @@ export class Viewer {
   }
 
   showTab(tab: Tab): void {
+    const changed = tab !== this.tab;
     this.tab = tab;
     this.render();
+    if (changed) this.opts.onTabChange?.(tab);
   }
 
   get viewingFile(): string | null {
@@ -442,6 +462,7 @@ export class Viewer {
         errors ? h('span', { class: 'count err' }, String(errors)) : null,
         !errors && warnings ? h('span', { class: 'count warn' }, String(warnings)) : null),
       tab('comments', 'Comments', this.commentCount ? h('span', { class: 'count' }, String(this.commentCount)) : null),
+      tab('chat', 'Chat', this.chatUnread ? h('span', { class: `count${this.chatMentioned ? ' mention' : ''}`, title: this.chatMentioned ? 'Unread, and you were mentioned' : 'Unread messages' }, String(this.chatUnread)) : null),
     ];
     if (this.file) {
       const close = h('span', { class: 'close', title: 'Close' }, '×');
@@ -483,6 +504,8 @@ export class Viewer {
       content.push(this.logView);
     } else if (this.tab === 'comments' && this.commentsPanel) {
       content.push(this.commentsPanel);
+    } else if (this.tab === 'chat' && this.chatPanel) {
+      content.push(this.chatPanel);
     } else if (this.file) {
       this.renderFile();
       content.push(this.fileView);

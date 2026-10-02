@@ -53,6 +53,23 @@ No accounts. On a tailnet with `--access`, your tailnet login is your identity.
   + comments** or **Compiled PDF with comments** (real PDF sticky notes).
   Agents see them in `.texwerk/comments.md` and use `node .texwerk/tw
   comments | comment | reply | resolve`.
+- **Chat.** The **Chat** tab next to **Comments** is a running conversation
+  for the whole project, open to view-only people too. Enter sends,
+  Shift+Enter starts a new line, `@` completes the names of the people here
+  plus `@agent` and `@all`. `main.tex:12` or `comment:<id>` in a message
+  (or attached by an agent) jumps to the line or opens the thread. The tab
+  counts unread messages (per browser), mentions of you are highlighted and
+  put "(N)" in the window title, and the bell in the tab switches on browser
+  notifications for mentions (and @all / @everyone) while the page is in the
+  background. The chat is saved to `.texwerk/chat.jsonl` (one message per
+  line) and committed with every label; a revert does not roll it back.
+  Agents see the newest 200 messages in `.texwerk/chat.md` and use `node
+  .texwerk/tw chat [--since <id>]`, `node .texwerk/tw say "text" [--ref
+  main.tex:12 | --ref comment:<id>]` — shown as "*you* · agent" — and `node
+  .texwerk/tw chat --wait [--all]`, which blocks until someone writes
+  `@agent` (with `--all`: until any person writes anything) and prints it, so
+  an agent session can sit and wait for instructions. `node .texwerk/tw help`
+  lists every command.
 - **Who wrote what.** The **Authors** switch above the editor tints the text by
   who last wrote each part of it — people, "… · agent" for mirrored agents,
   and whoever uploaded, restored or pulled for server-side changes — with a

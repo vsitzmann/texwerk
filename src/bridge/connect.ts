@@ -10,6 +10,7 @@ import { BRIDGE_HEADER, type BinInfo, type CompileSummary, type ServerEvent } fr
 import { applyEditsToYText, editsBetween } from '../shared/textDiff.ts';
 import { watchTree } from '../shared/watchTree.ts';
 import { allThreads, commentsMarkdown } from '../shared/comments.ts';
+import { chatArray, chatMarkdown } from '../shared/chat.ts';
 
 /**
  * texwerk-connect.mjs — mirror a live TeXWerk project into a local folder.
@@ -354,7 +355,19 @@ function scheduleCommentsFile(): void {
   }, 300);
 }
 
+/** `.texwerk/chat.md`: the newest chat messages, for agents to read. */
+let chatTimer: NodeJS.Timeout | null = null;
+function scheduleChatFile(): void {
+  if (chatTimer) return;
+  chatTimer = setTimeout(() => {
+    chatTimer = null;
+    void writeFile(join(root, LOCAL_DIR, 'chat.md'), chatMarkdown(project, chatArray(doc).toArray())).catch(() => {});
+  }, 300);
+}
+
 function watchStructure(): void {
+  chatArray(doc).observe(() => scheduleChatFile());
+  scheduleChatFile();
   doc.getMap('comments').observeDeep(() => scheduleCommentsFile());
   // Line numbers in the digest follow the text.
   doc.getMap('text').observeDeep(() => { if (doc.getMap('comments').size) scheduleCommentsFile(); });
@@ -570,6 +583,22 @@ the text.
 When you address a comment, change the text, then reply saying what you did
 and resolve it. Your comments and replies show as "${me} · agent".
 
+## Chat
+
+The project has a chat, next to the comments: people talk to each other and
+to you there. \`.texwerk/chat.md\` holds the newest 200 messages (id, time,
+author) and is kept current while this mirror runs. A message containing
+**@agent** is addressed to you; so are @all and @everyone.
+
+    node .texwerk/tw chat                      # the conversation (--since <id> for what came after it)
+    node .texwerk/tw say "Done, see main.tex:42"
+    node .texwerk/tw say "Fixed" --ref main.tex:42      # with a link to a line (or --ref comment:<id>)
+    node .texwerk/tw chat --wait               # block until someone writes @agent, then print it
+    node .texwerk/tw chat --wait --all         # … or until anyone (not an agent) writes anything
+
+To work on instructions from the chat, loop: \`tw chat --wait\`, do what it
+asks, answer with \`tw say\`, wait again. Your messages show as "${me} · agent".
+
 ## Compiling
 
 The server compiles the project (latexmk). To compile and see the result:
@@ -593,6 +622,17 @@ const base = cfg.origin + '/api/compile?project=' + encodeURIComponent(cfg.proje
 const cmd = process.argv[2] || 'compile';
 const args = process.argv.slice(3);
 const commentsUrl = cfg.origin + '/api/comments?project=' + encodeURIComponent(cfg.project) + name;
+const chatUrl = cfg.origin + '/api/chat?project=' + encodeURIComponent(cfg.project) + name;
+const stamp = (ts) => new Date(ts).toISOString().slice(0, 16).replace('T', ' ');
+const line = (m) => '[' + m.id + '] ' + stamp(m.ts) + ' ' + m.author + ': ' + m.text.split('\\n').join('\\n    ')
+  + (m.ref ? ' [→ ' + (m.ref.commentId ? 'comment ' + m.ref.commentId : m.ref.file + ':' + m.ref.line) + ']' : '');
+const getChat = async (since, wait) => {
+  const r = await fetch(chatUrl + (since ? '&since=' + encodeURIComponent(since) : '') + (wait ? '&wait=1' : ''), { headers: { 'x-texwerk-bridge': '1' } });
+  const j = await r.json();
+  if (!r.ok) { console.error(j.error); process.exit(1); }
+  return j.messages;
+};
+const opt = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
 const post = async (body) => {
   const r = await fetch(commentsUrl, { method: 'POST', headers: { 'x-texwerk-bridge': '1', 'content-type': 'application/json' }, body: JSON.stringify(body) });
   const j = await r.json();
@@ -635,6 +675,46 @@ const show = (c) => {
     if (!file || !line || !text) { console.error('usage: tw comment <file> <line> "text" [--quote "exact words"]'); process.exit(2); }
     const j = await post({ op: 'create', path: file, line: Number(line), quote, text });
     console.log('created ' + j.id);
+    return;
+  }
+  if (cmd === 'chat' && args.includes('--wait')) {
+    // Waits for a message by a person that mentions @agent (@all, @everyone),
+    // or with --all for any message by a person.
+    let since = opt('--since');
+    if (!since) { const all = await getChat(); since = all.length ? all[all.length - 1].id : undefined; }
+    for (;;) {
+      const list = since ? await getChat(since, true) : await getChat();
+      if (!since && !list.length) { await new Promise((r) => setTimeout(r, 2000)); continue; }
+      if (list.length) since = list[list.length - 1].id;
+      const hits = list.filter((m) => !m.agent && (args.includes('--all') || m.mentions.some((x) => x === 'agent' || x === 'all' || x === 'everyone')));
+      if (hits.length) { for (const m of hits) console.log(line(m)); return; }
+    }
+  }
+  if (cmd === 'chat') {
+    const list = await getChat(opt('--since'));
+    if (!list.length) console.log('No messages.');
+    for (const m of list) console.log(line(m));
+    return;
+  }
+  if (cmd === 'say') {
+    const ref = opt('--ref');
+    const ri = args.indexOf('--ref');
+    const text = (ri >= 0 ? args.slice(0, ri).concat(args.slice(ri + 2)) : args).join(' ');
+    if (!text) { console.error('usage: tw say "text" [--ref file:line | --ref comment:<id>]'); process.exit(2); }
+    const r = await fetch(chatUrl, { method: 'POST', headers: { 'x-texwerk-bridge': '1', 'content-type': 'application/json' }, body: JSON.stringify({ text, ref }) });
+    const j = await r.json();
+    if (!r.ok) { console.error(j.error); process.exit(1); }
+    console.log('sent ' + j.message.id);
+    return;
+  }
+  if (cmd === 'help' || cmd === '-h' || cmd === '--help') {
+    console.log([
+      'node .texwerk/tw compile | log | status',
+      'node .texwerk/tw comments [--all] | comment <file> <line> "text" [--quote "words"] | reply <id> "text" | resolve <id> | reopen <id>',
+      'node .texwerk/tw chat [--since <id>]          print the chat',
+      'node .texwerk/tw chat --wait [--all]          wait for the next message to @agent (--all: any message by a person)',
+      'node .texwerk/tw say "text" [--ref file:line | --ref comment:<id>]',
+    ].join('\\n'));
     return;
   }
   if (cmd === 'compile') {
