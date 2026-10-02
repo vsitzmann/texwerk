@@ -1,4 +1,4 @@
-import { EditorState, Prec, type Extension } from '@codemirror/state';
+import { EditorSelection, EditorState, Prec, type Extension } from '@codemirror/state';
 import { EditorView, keymap } from '@codemirror/view';
 import {
   autocompletion, closeCompletion, completionStatus, selectedCompletion, snippet, startCompletion,
@@ -466,9 +466,48 @@ function enterPastCompletion(view: EditorView): boolean {
   return false;
 }
 
+// ------------------------------------------------------------ Closing brackets
+
+const OPENER: Record<string, string> = { ')': '(', ']': '[', '}': '{' };
+
+/**
+ * Typing a closing bracket right before the same closing bracket steps over
+ * it when the document already has enough of them, so \textbf{word|} plus }
+ * leaves the group instead of writing }}. closeBrackets only does this for
+ * brackets it inserted itself in this session. Escaped \{ \} and comments
+ * don't count.
+ */
+export function shouldStepOver(text: string, pos: number, close: string): boolean {
+  const open = OPENER[close];
+  if (!open || text[pos] !== close) return false;
+  if (text[pos - 1] === '\\') return false; // typing \} is a literal brace
+  const clean = stripComments(text);
+  let depth = 0;
+  for (let i = 0; i < clean.length; i++) {
+    if (clean[i] === '\\') { i++; continue; }
+    if (clean[i] === open) depth++;
+    else if (clean[i] === close) depth--;
+  }
+  return depth <= 0;
+}
+
+const stepOverClosing = EditorView.inputHandler.of((view, from, to, text) => {
+  if (!(text in OPENER) || view.state.readOnly) return false;
+  const doc = view.state.doc.toString();
+  const ranges = view.state.selection.ranges;
+  if (!ranges.every((r) => r.empty && shouldStepOver(doc, r.head, text))) return false;
+  view.dispatch(view.state.update({
+    selection: EditorSelection.create(ranges.map((r) => EditorSelection.cursor(r.head + 1)),
+      view.state.selection.mainIndex),
+    scrollIntoView: true, userEvent: 'input.type',
+  }));
+  return true;
+});
+
 export function latexSupport(project: LatexProject): Extension {
   return [
     Prec.highest(keymap.of([{ key: 'Enter', run: enterPastCompletion }])),
+    Prec.high(stepOverClosing),
     autocompletion({ override: [latexCompletions(project)], icons: false }),
     keymap.of([{ key: 'Enter', run: latexEnter }]),
     // LaTeX quotes are `` and '', not pairs of ' or ".

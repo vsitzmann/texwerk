@@ -297,3 +297,14 @@ test('renaming an open project moves everyone in it, edits made during the move 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('typing a closing bracket steps over an existing one only when balanced', async () => {
+  const { shouldStepOver } = await import('../src/client/latex.ts');
+  assert.equal(shouldStepOver('\\textbf{word}', 12, '}'), true);
+  assert.equal(shouldStepOver('f(x)', 3, ')'), true);
+  assert.equal(shouldStepOver('{a{b}', 4, '}'), false); // outer group still open
+  assert.equal(shouldStepOver('\\{a\\}', 3, '}'), false); // typing \}
+  assert.equal(shouldStepOver('{a}', 1, '}'), false); // not before a closer
+  assert.equal(shouldStepOver('{a} % {\n', 2, '}'), true); // comment ignored
+  assert.equal(shouldStepOver('\\{ {a}', 5, '}'), true); // escaped brace ignored
+});
