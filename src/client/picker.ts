@@ -127,7 +127,7 @@ export function showPicker(opts: { me: Me; dismissable: boolean; folder?: string
         .then(() => reopen(folder), fail('Rename'));
     });
     const remove = rowButton('Delete…', 'Delete this folder (only when it is empty)', async () => {
-      if (!await confirmDialog('Delete folder', `Delete the folder “${entry.name}”? Only an empty folder can be deleted.`, 'Delete', true)) return;
+      if (!await confirmDialog('Delete folder', `Delete the folder “${entry.name}”? Only an empty folder can be deleted; it is moved to the trash.`, 'Delete', true)) return;
       await api('DELETE', `/api/folders?path=${encodeURIComponent(entry.path)}`).then(() => reopen(folder), fail('Delete'));
     });
     return rowGroup(row, [rename, remove]);
@@ -158,7 +158,12 @@ export function showPicker(opts: { me: Me; dismissable: boolean; folder?: string
     });
     const move = rowButton('Move…', 'Put this project in a folder', () => showMoveDialog(p, folders, (r) => (p.id === opts.current ? go(r) : reopen(folderOf(r)))));
     const share = rowButton('Share…', 'Change who can open this project', () => showShareDialog(p.id, opts.me, () => reopen(folder)));
-    return rowGroup(row, opts.me.access ? [rename, move, share] : [rename, move]);
+    const remove = rowButton('Delete…', 'Move this project to the trash', async () => {
+      if (!await confirmDialog('Delete project', `Delete the project “${p.name}”? It is moved to the trash and can be restored from there. Anyone who has it open is disconnected.`, 'Delete', true)) return;
+      await api('POST', `/api/projects/delete?project=${encodeURIComponent(p.id)}`)
+        .then(() => (p.id === opts.current ? (location.href = '/') : reopen(folder)), fail('Delete'));
+    });
+    return rowGroup(row, opts.me.access ? [rename, move, share, remove] : [rename, move, remove]);
   };
 
   const renderTrail = (folders: FolderEntry[]) => {
@@ -259,7 +264,8 @@ export function showPicker(opts: { me: Me; dismissable: boolean; folder?: string
     opts.dismissable ? h('button', { onclick: close }, 'Cancel') : '',
     h('button', { onclick: newProject }, 'New project…'),
     h('button', { onclick: newFolder }, 'New folder…'),
-    importBtn);
+    importBtn,
+    h('button', { title: 'Deleted projects and folders', onclick: () => showProjectTrash(() => void render()) }, 'Trash…'));
 
   const who = opts.me.access ? h('span', { class: 'picker-who', title: opts.me.you.login }, `${opts.me.you.name}${opts.me.admin ? ' · admin' : ''}`) : '';
   box.append(
@@ -411,4 +417,35 @@ export function showShareDialog(id: string, me: Me, onSaved?: () => void): void 
     })().catch((err) => { body.textContent = `Could not load sharing: ${(err as Error).message}`; });
     return [h('h2', {}, `Share “${id.split('/').pop()}”`), body, actions];
   });
+}
+
+interface RootTrashItem { id: string; kind: 'project' | 'folder'; path: string; deletedAt: string; deletedBy: string; canRestore: boolean }
+
+/** Deleted projects and folders this person could see; nothing can be removed from here. */
+async function showProjectTrash(onRestored: () => void): Promise<void> {
+  let items: RootTrashItem[];
+  try { items = (await api<{ items: RootTrashItem[] }>('GET', '/api/projects/trash')).items; } catch (err) { toast((err as Error).message, 'bad'); return; }
+  dialog((close) => {
+    const rows = items.map((t) => {
+      const restore = h('button', { title: 'Put it back where it was' }, 'Restore');
+      restore.addEventListener('click', async () => {
+        try {
+          await api('POST', `/api/projects/trash/restore?id=${encodeURIComponent(t.id)}`);
+          toast(`Restored ${t.path}`);
+          close();
+          onRestored();
+        } catch (err) { toast(`Restore failed: ${(err as Error).message}`, 'bad'); }
+      });
+      return h('div', { class: 'trash-row' },
+        h('div', { class: 'trash-name' }, `${t.path}${t.kind === 'folder' ? ' (folder)' : ''}`,
+          h('div', { class: 'muted' }, `deleted ${new Date(t.deletedAt).toLocaleString()} by ${t.deletedBy}`)),
+        t.canRestore ? restore : '');
+    });
+    return [
+      h('h2', {}, 'Trash'),
+      h('p', { class: 'muted' }, 'Deleted projects and folders you have access to. They are kept for good.'),
+      h('div', { class: 'trash-list' }, ...(rows.length ? rows : [h('p', { class: 'muted' }, 'The trash is empty.')])),
+      h('div', { class: 'actions' }, h('button', { class: 'primary', onclick: close }, 'Close')),
+    ];
+  }, { wide: true });
 }

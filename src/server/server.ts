@@ -13,6 +13,7 @@ import {
   canManage, FOLDER_MARKER, folderVisibleTo, normalizeLogin, normalizeShares, readAccess, readFolderOwner, roleFor,
   UserDirectory, writeAccess, writeFolderMarker, type ProjectAccess, type ProjectRole,
 } from './access.ts';
+import { itemPath, listTrash, moveToTrash, restoreFromTrash, ROOT_TRASH, validTrashId, type TrashMeta } from './trash.ts';
 import { Project, type Conn } from './project.ts';
 import { readZip, writeZip } from './zip.ts';
 import { allThreads, commentsMarkdown, sortThreads } from '../shared/comments.ts';
@@ -141,6 +142,7 @@ export async function startServer(options: ServerOptions) {
   /** Projects whose folder is being renamed: nobody may (re)open the old id meanwhile. */
   const relocating = new Set<string>();
   const access = options.access ? { admin: normalizeLogin(options.access.admin) } : null;
+  const rootTrash = join(rootDir, ROOT_TRASH);
   const users = access ? new UserDirectory(join(rootDir, '.texwerk-users.json')) : null;
 
   // --------------------------------------------------------- the catalog
@@ -574,8 +576,77 @@ export async function startServer(options: ServerOptions) {
       const folder = await manageFolder(url.searchParams.get('path') ?? '');
       const inside = (await readdir(dirOf(folder))).filter((n) => n !== FOLDER_MARKER);
       if (inside.length) throw new HttpError(409, 'only an empty folder can be deleted');
-      await rm(dirOf(folder), { recursive: true });
+      await moveToTrash(rootTrash, dirOf(folder), { kind: 'folder', path: folder, deletedAt: new Date().toISOString(), deletedBy: identity.login });
       return json(response, 200, { ok: true });
+    }
+
+    /**
+     * Deleting a project moves it to `<root>/.trash/` (never really deleted).
+     * Only its owner (or the admin) may; everyone in it is disconnected first
+     * and the document is persisted, so nothing writes the folder back.
+     */
+    if (path === '/api/projects/delete' && method === 'POST') {
+      const id = cleanProjectId(projectParam ?? '') ?? '';
+      await requireRole(identity, id, 'manage');
+      if (relocating.has(id)) throw new HttpError(409, 'this project is being renamed');
+      relocating.add(id);
+      let conns: Conn[] = [];
+      try {
+        const open = projects.get(id);
+        const project = open ? await open.catch(() => null) : null;
+        if (project) {
+          for (let c = project.isCompiling(); c; c = project.isCompiling()) await c.catch(() => {});
+          conns = [...project.conns];
+          projects.delete(id);
+          await project.close(false);
+        }
+        await moveToTrash(rootTrash, dirOf(id), { kind: 'project', path: id, deletedAt: new Date().toISOString(), deletedBy: identity.login });
+      } finally {
+        relocating.delete(id);
+        for (const c of conns) c.ws.close(4404, 'project deleted');
+      }
+      return json(response, 200, { ok: true });
+    }
+
+    /**
+     * Trashed projects and folders, filtered exactly like the catalog: a
+     * project by its own access.json (which travelled with it), a folder for
+     * its creator and the admin (the only people who see an empty folder).
+     */
+    const visibleRootTrash = async () => {
+      const out: Array<TrashMeta & { canRestore: boolean }> = [];
+      for (const meta of await listTrash(rootTrash)) {
+        const item = itemPath(rootTrash, meta);
+        if (meta.kind === 'project') {
+          if (!access) { out.push({ ...meta, canRestore: true }); continue; }
+          const pa = await readAccess(item, access);
+          if (!roleFor(identity.login, pa, access)) continue;
+          out.push({ ...meta, canRestore: canManage(identity.login, pa, access) });
+        } else if (meta.kind === 'folder') {
+          const mine = !access || identity.login === access.admin || (await readFolderOwner(item, access)) === identity.login;
+          if (mine) out.push({ ...meta, canRestore: true });
+        }
+      }
+      return out;
+    };
+
+    if (path === '/api/projects/trash' && method === 'GET') {
+      return json(response, 200, { items: await visibleRootTrash() });
+    }
+
+    if (path === '/api/projects/trash/restore' && method === 'POST') {
+      const tid = url.searchParams.get('id');
+      if (!validTrashId(tid)) throw new HttpError(400, 'invalid trash id');
+      const meta = (await visibleRootTrash()).find((m) => m.id === tid);
+      if (!meta) throw new HttpError(404, 'no such item in the trash');
+      if (!meta.canRestore) throw new HttpError(403, 'only the owner can restore this');
+      const clean = cleanProjectId(meta.path);
+      if (!clean) throw new HttpError(400, 'invalid original path');
+      const parent = clean.includes('/') ? clean.slice(0, clean.lastIndexOf('/')) : '';
+      // Back where it was if that folder still exists, else at the top level.
+      const to = parent && isFolderDir(dirOf(parent)) ? clean : clean.split('/').pop()!;
+      try { await restoreFromTrash(rootTrash, meta, dirOf(to)); } catch (err) { throw new HttpError(409, (err as Error).message); }
+      return json(response, 200, { id: to });
     }
 
     if (path === '/api/access') {
@@ -634,11 +705,26 @@ export async function startServer(options: ServerOptions) {
       else if (body.op === 'newfile') {
         if (project.exists(rel)) throw new HttpError(409, `"${rel}" already exists`);
         await project.putFile(rel, Buffer.alloc(0), who);
-      } else if (body.op === 'delete') await project.remove(rel, who);
+      } else if (body.op === 'delete') {
+        if (!project.exists(rel)) throw new HttpError(404, `no "${rel}"`);
+        await project.remove(rel, who);
+      }
       else if (body.op === 'move') {
         try { await project.move(rel, bodyPath(body.to), who); } catch (err) { throw new HttpError(409, (err as Error).message); }
       } else throw new HttpError(400, 'unknown op');
       return json(response, 200, { ok: true });
+    }
+
+    // The project's trash: everyone who may open the project may see it
+    // (role checked above); restoring changes the project, so needs edit.
+    if (path === '/api/trash' && method === 'GET') {
+      return json(response, 200, { items: await project.listTrash() });
+    }
+
+    if (path === '/api/trash/restore' && method === 'POST') {
+      const tid = url.searchParams.get('id');
+      if (!validTrashId(tid)) throw new HttpError(400, 'invalid trash id');
+      try { return json(response, 200, { path: await project.restoreTrashed(tid, who) }); } catch (err) { throw new HttpError(409, (err as Error).message); }
     }
 
     if (path === '/api/compile' && method === 'POST') {

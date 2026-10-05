@@ -1,7 +1,7 @@
 import type * as Y from 'yjs';
 import { extensionOf, IMAGE_EXTENSIONS } from '@shared/files.ts';
 import type { BinInfo } from '@shared/protocol.ts';
-import { api, confirmDialog, h, menuAt, prompt, toast, upload, withName } from './ui.ts';
+import { api, confirmDialog, dialog, h, menuAt, prompt, toast, upload, withName } from './ui.ts';
 
 /**
  * The file browser on the left, Overleaf-style: folders, files, the main
@@ -20,6 +20,8 @@ export interface TreeOptions {
   getMainFile: () => string;
   setMainFile: (path: string) => void;
 }
+
+interface TrashItem { id: string; kind: string; path: string; deletedAt: string; deletedBy: string }
 
 interface TreeNode {
   name: string;
@@ -60,7 +62,8 @@ export class FileTree {
       h('button', { class: 'ghost icon', title: 'New file', onclick: () => void this.newFile('') }, '+file'),
       h('button', { class: 'ghost icon', title: 'New folder', onclick: () => void this.newFolder('') }, '+dir'),
       h('button', { class: 'ghost icon', title: 'Upload files', onclick: () => this.pickUpload('') }, '↑'));
-    const head = h('div', { class: 'pane-head' }, h('span', { class: 'label' }, 'Files'), h('span', { class: 'spacer' }), ...this.headButtons);
+    const trashBtn = h('button', { class: 'ghost icon', title: 'Trash: deleted files and folders', onclick: () => void this.showTrash() }, 'trash');
+    const head = h('div', { class: 'pane-head' }, h('span', { class: 'label' }, 'Files'), h('span', { class: 'spacer' }), ...this.headButtons, trashBtn);
     this.hint = h('div', { class: 'tree-hint' }, 'Drop files or folders here to upload.');
     this.root.append(head, this.list, this.hint);
     for (const map of [opts.texts, opts.bins, opts.dirs]) map.observe(() => this.queueRender());
@@ -274,9 +277,38 @@ export class FileTree {
 
   private async remove(path: string): Promise<void> {
     const isDir = this.opts.dirs.has(path);
-    const ok = await confirmDialog(`Delete ${isDir ? 'folder' : 'file'}`, `Delete "${path}"${isDir ? ' and everything in it' : ''}? It stays in the history and can be restored from there.`, 'Delete', true);
+    const ok = await confirmDialog(`Delete ${isDir ? 'folder' : 'file'}`, `Delete "${path}"${isDir ? ' and everything in it' : ''}? It is moved to the project's trash and can be restored from there.`, 'Delete', true);
     if (!ok) return;
     try { await api('POST', `/api/fs?project=${encodeURIComponent(this.opts.project())}`, { op: 'delete', path }); } catch (err) { toast((err as Error).message, 'bad'); }
+  }
+
+  /** Deleted files and folders of this project; nothing can be removed from here. */
+  private async showTrash(): Promise<void> {
+    const project = encodeURIComponent(this.opts.project());
+    let items: TrashItem[];
+    try { items = (await api<{ items: TrashItem[] }>('GET', `/api/trash?project=${project}`)).items; } catch (err) { toast((err as Error).message, 'bad'); return; }
+    dialog((close) => {
+      const rows = items.map((t) => {
+        const restore = h('button', { title: `Put it back at ${t.path}` }, 'Restore');
+        restore.addEventListener('click', async () => {
+          try {
+            await api('POST', `/api/trash/restore?project=${project}&id=${encodeURIComponent(t.id)}`);
+            toast(`Restored ${t.path}`);
+            close();
+          } catch (err) { toast((err as Error).message, 'bad'); }
+        });
+        return h('div', { class: 'trash-row' },
+          h('div', { class: 'trash-name' }, `${t.path}${t.kind === 'dir' ? '/' : ''}`,
+            h('div', { class: 'muted' }, `deleted ${new Date(t.deletedAt).toLocaleString()} by ${t.deletedBy}`)),
+          this.readOnly ? '' : restore);
+      });
+      return [
+        h('h2', {}, 'Trash'),
+        h('p', { class: 'muted' }, 'Deleted files and folders of this project. They are kept for good.'),
+        h('div', { class: 'trash-list' }, ...(rows.length ? rows : [h('p', { class: 'muted' }, 'The trash is empty.')])),
+        h('div', { class: 'actions' }, h('button', { class: 'primary', onclick: close }, 'Close')),
+      ];
+    }, { wide: true });
   }
 
   private async move(from: string, to: string): Promise<void> {

@@ -9,7 +9,7 @@ import * as syncProtocol from 'y-protocols/sync';
 import * as awarenessProtocol from 'y-protocols/awareness';
 import * as encoding from 'lib0/encoding';
 import * as decoding from 'lib0/decoding';
-import { colorFor, isTextFile, RESERVED_DIRS } from '../shared/files.ts';
+import { cleanPath, colorFor, isTextFile, RESERVED_DIRS } from '../shared/files.ts';
 import {
   MSG_AWARENESS, MSG_SYNC,
   type AuthorInfo, type BinInfo, type CompileSummary, type Identity, type ProjectSettings, type ServerEvent,
@@ -21,6 +21,7 @@ import { authorRuns } from '../shared/provenance.ts';
 import { BUILD_DIR, runLatexmk } from './compile.ts';
 import { ensureRepo } from './git.ts';
 import { hashBytes, History } from './history.ts';
+import { listTrash, moveToTrash, PROJECT_TRASH, readEntry, restoreFromTrash, type TrashMeta } from './trash.ts';
 
 /**
  * One open project: the authoritative Y.Doc, its connections, and the
@@ -583,8 +584,36 @@ export class Project {
     const doomed = [...this.texts.keys(), ...this.bins.keys()].filter((p) => p === path || p.startsWith(prefix));
     // History first, while the content is still readable: deleted files stay restorable.
     for (const p of doomed) await this.history.flushPath(p, author);
-    await rm(join(this.dir, path), { recursive: true, force: true });
+    // Never deleted: moved into the project's hidden trash (.texwerk/trash/).
+    // Reconciling the now-missing path removes it from the shared document,
+    // so open editors close it and mirrors delete their copy.
+    let info;
+    try { info = await lstat(join(this.dir, path)); } catch { info = null; }
+    if (info) {
+      await moveToTrash(this.trashDir, join(this.dir, path), {
+        kind: info.isDirectory() ? 'dir' : 'file', path, deletedAt: new Date().toISOString(), deletedBy: author,
+      });
+    }
     await this.reconcile(path, author);
+  }
+
+  get trashDir(): string {
+    return join(this.dir, ...PROJECT_TRASH);
+  }
+
+  listTrash(): Promise<TrashMeta[]> {
+    return listTrash(this.trashDir);
+  }
+
+  /** Put a trashed file or folder back where it was; refuses if the path is taken. */
+  async restoreTrashed(id: string, author: string): Promise<string> {
+    const meta = await readEntry(this.trashDir, id);
+    if (!meta || (meta.kind !== 'file' && meta.kind !== 'dir') || cleanPath(meta.path) !== meta.path) throw new Error('no such item in the trash');
+    if (this.exists(meta.path)) throw new Error(`"${meta.path}" exists again; rename it first`);
+    await mkdir(dirname(join(this.dir, meta.path)), { recursive: true });
+    await restoreFromTrash(this.trashDir, meta, join(this.dir, meta.path));
+    await this.reconcile(meta.path, author);
+    return meta.path;
   }
 
   async move(from: string, to: string, author: string): Promise<void> {
