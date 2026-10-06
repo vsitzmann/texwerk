@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { basename, delimiter, join, resolve } from 'node:path';
 import type { CompileIssue, ProjectSettings } from '../shared/protocol.ts';
 
 /**
@@ -15,6 +15,8 @@ import type { CompileIssue, ProjectSettings } from '../shared/protocol.ts';
  */
 
 export const BUILD_DIR = join('.texwerk', 'build');
+/** Packages that override buggy TeX Live ones (see tex/README.md). */
+const TEX_OVERRIDES = resolve(import.meta.dirname, '..', '..', 'tex');
 const TIMEOUT_MS = 240_000;
 
 export interface CompileRun {
@@ -53,7 +55,11 @@ export async function runLatexmk(projectDir: string, settings: ProjectSettings, 
   ];
   const output = await new Promise<{ code: number | null; text: string }>((resolve) => {
     let text = '';
-    const child = spawn('latexmk', args, { cwd: projectDir, env: { ...process.env, max_print_line: '1000' } });
+    const child = spawn('latexmk', args, { cwd: projectDir, env: {
+      ...process.env, max_print_line: '1000',
+      // The project first, then our overrides, then TeX Live (the empty entry).
+      TEXINPUTS: `.${delimiter}${TEX_OVERRIDES}${delimiter}`,
+    } });
     const timer = setTimeout(() => { text += '\n[TeXWerk] Compile timed out and was stopped.\n'; child.kill('SIGKILL'); }, TIMEOUT_MS);
     child.stdout.on('data', (d) => { text += d; });
     child.stderr.on('data', (d) => { text += d; });

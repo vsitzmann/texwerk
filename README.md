@@ -46,7 +46,9 @@ No accounts. On a tailnet with `--access`, your tailnet login is your identity.
   the gutter; the PDF gets a pin in the margin at the same place (via
   SyncTeX). Threads are conversations: reply, edit, resolve, reopen. The
   **Comments** tab lists them — open ones in document order, resolved ones
-  greyed at the bottom — and jumps to the text. View-only people can comment.
+  greyed at the bottom — and jumps to the text. **Link** on a thread copies
+  an address (`?project=…&comment=<id>`) that opens the project at that
+  thread, for anyone who has access to the project. View-only people can comment.
   Nothing is written into the .tex files: threads live beside them, stay
   attached to their words while people type, are committed with every label
   (`.texwerk/comments.json`), and come along on request as **Project as .zip
@@ -86,11 +88,14 @@ No accounts. On a tailnet with `--access`, your tailnet login is your identity.
   files by dragging, rename, delete (restorable from history), set the main
   document.
 - **Viewer.** The compiled PDF (PDF.js; keeps your place across recompiles,
-  zoom, SyncTeX both ways: double-click the PDF to jump to the source,
-  `Ctrl+Alt+→` / ⇢ to jump from the cursor to the PDF), or the image/PDF
+  zoom, SyncTeX both ways: double-click the PDF to jump to the source;
+  double-click the source — which still selects the word — or press
+  `Ctrl+Alt+→` / ⇢ to jump to that place in the PDF), or the image/PDF
   selected in the file tree.
 - **Compile.** `latexmk` with pdfLaTeX, XeLaTeX or LuaLaTeX; auto-compile after
-  edits or `Ctrl+S` / `Ctrl+Enter`. The Log tab lists errors and warnings with
+  edits or `Ctrl+S` / `Ctrl+Enter`. `tex/` holds fixed versions of packages
+  that are buggy in the server's TeX Live (lineno), found after the project's
+  own files and before TeX Live's. The Log tab lists errors and warnings with
   links to the line, and the raw latexmk output and TeX log.
 - **Download** the project as a .zip or the compiled PDF at any time. New
   projects from a template, from an uploaded .zip, or by cloning a git repo.
@@ -162,6 +167,7 @@ discards it instead of merging, which would duplicate every document.
 npm test                                    # unit tests
 node test/e2e-bridge.ts <origin> <project> <mirrorDir>          # with a server and a running bridge
 node test/e2e-latex-editing.ts <origin> <projectsRoot>          # completion, Enter and vim in Chromium
+node test/e2e-links-and-sync.ts <origin>                        # comment links, double-click to PDF, lineno fix
 MODE=all node test/stress-bridge.ts <origin> <project> <mirrorDir> 8
 ```
 

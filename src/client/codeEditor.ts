@@ -214,7 +214,8 @@ export interface CodeEditorOptions {
   awareness: Awareness;
   onCursor: (line: number, col: number) => void;
   onCompile: () => void;
-  onSyncToPdf: () => void;
+  /** Show the cursor's line (or `line`, double-clicked) in the PDF. */
+  onSyncToPdf: (line?: number) => void;
   readOnly?: boolean;
   /** The rest of the project, for completing labels, citations and files. */
   project?: Omit<LatexProject, 'path'>;
@@ -293,6 +294,12 @@ export class CodeEditor {
             if (range && this.view.state.selection.main.empty) {
               opts.onOpenThread?.([range.dataset.thread!], range.getBoundingClientRect());
             }
+            return false;
+          },
+          // Double-click still selects the word, and also shows it in the PDF.
+          dblclick: (e, view) => {
+            const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+            if (pos !== null) opts.onSyncToPdf(view.state.doc.lineAt(pos).number);
             return false;
           },
         }),

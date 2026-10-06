@@ -188,13 +188,8 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
     visible: () => viewer.activeTab === 'chat',
     isFile: (path) => texts.has(path) || bins.has(path),
     openRef: (ref) => {
-      if ('commentId' in ref) {
-        const t = comments.all().find((x) => x.id === ref.commentId);
-        if (!t) { toast('That comment no longer exists.'); return; }
-        viewer.showTab('comments');
-        comments.select(t.id);
-        revealThread(t);
-      } else if (texts.has(ref.file)) openFile(ref.file, ref.line);
+      if ('commentId' in ref) goToThread(ref.commentId);
+      else if (texts.has(ref.file)) openFile(ref.file, ref.line);
       else toast(`"${ref.file}" is not a text file in this project.`);
     },
     onChange: () => {
@@ -212,6 +207,15 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
     current.setComments(comments.visible(currentPath).map((t) => ({
       id: t.id, from: t.from!, to: t.to!, color: colorFor(t.login.replace(/:agent$/, '')), replies: t.messages.length,
     })));
+  }
+
+  /** Open a thread from a chat reference or a comment link: its card and its text. */
+  function goToThread(id: string): void {
+    const t = comments.find(id);
+    if (!t) { toast('That comment no longer exists.'); return; }
+    viewer.showTab('comments');
+    comments.select(t.id);
+    revealThread(t);
   }
 
   function revealThread(t: CommentThread): void {
@@ -277,6 +281,8 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
   };
   let synced = false;
   let pendingOpen: string | null = new URLSearchParams(location.search).get('file');
+  // A comment link (?comment=<id>): opened once the document is here.
+  const pendingComment = new URLSearchParams(location.search).get('comment');
   const provider = new Provider({
     url: wsUrl(),
     doc,
@@ -294,6 +300,12 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
       pendingOpen = null;
       if (initial) openFile(initial);
       else showPlaceholder();
+      if (pendingComment) {
+        goToThread(pendingComment);
+        const url = new URL(location.href);
+        url.searchParams.delete('comment');
+        history.replaceState(null, '', url);
+      }
     },
     onEvent: (event) => onServerEvent(event),
     // The server restarted and reloaded the project: this tab's copy belongs
@@ -462,7 +474,7 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
         },
         onCursor: (l, c) => { statusCursor.textContent = `Ln ${l}, Col ${c}`; },
         onCompile: () => void runCompile(),
-        onSyncToPdf: () => void syncToPdf(),
+        onSyncToPdf: (line) => void syncToPdf(line),
         onComment: (from, to, rect) => {
           const quote = ytext.toString().slice(from, to);
           comments.compose(path, from, to, quote, rect, () => current?.view.focus());
@@ -605,12 +617,17 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
     } catch (err) { toast((err as Error).message, 'bad'); }
   }
 
-  async function syncToPdf(): Promise<void> {
+  /**
+   * Show a source line in the PDF: the cursor's (Ctrl+Alt+→), or a
+   * double-clicked one — which stays quiet where the PDF has nothing, since
+   * double-clicking is also how people select a word.
+   */
+  async function syncToPdf(clicked?: number): Promise<void> {
     if (!current || !currentPath) return;
-    const line = current.currentLine();
+    const line = clicked ?? current.currentLine();
     const r = await api<{ page: number | null; y?: number }>('GET', `/api/synctex/view?project=${encodeURIComponent(project)}&file=${encodeURIComponent(currentPath)}&line=${line}`);
     if (r.page) viewer.revealInPdf(r.page, r.y ?? 0);
-    else toast('No position in the PDF for this line (compile first).');
+    else if (clicked === undefined) toast('No position in the PDF for this line (compile first).');
   }
 
   compileBtn.addEventListener('click', () => void runCompile());

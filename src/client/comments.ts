@@ -1,7 +1,7 @@
 import type * as Y from 'yjs';
 import { allThreads, sortThreads, type CommentThread } from '@shared/comments.ts';
 import { colorFor } from '@shared/files.ts';
-import { api, confirmDialog, formatTime, h, toast } from './ui.ts';
+import { api, confirmDialog, copyText, formatTime, h, toast } from './ui.ts';
 
 /**
  * Comment threads in the browser: the list (the Comments tab), a thread
@@ -61,6 +61,20 @@ export class Comments {
     return this.threads;
   }
 
+  /** A thread by id, also right after the document arrived (before the list caught up). */
+  find(id: string): CommentThread | undefined {
+    if (!this.threads.some((t) => t.id === id)) this.refresh();
+    return this.threads.find((t) => t.id === id);
+  }
+
+  /** The address that opens the project at this thread (`?comment=`). */
+  link(id: string): string {
+    const url = new URL(location.pathname, location.origin);
+    url.searchParams.set('project', this.opts.project());
+    url.searchParams.set('comment', id);
+    return url.href;
+  }
+
   /** Open threads with text still attached — what the editor and PDF show. */
   visible(path?: string): CommentThread[] {
     if (!this.show) return [];
@@ -107,6 +121,11 @@ export class Comments {
       h('span', { class: 'thread-where', title: 'Go to the text' },
         t.from === null ? `${t.path} · text deleted` : `${t.path}:${t.line}`),
       h('span', { class: 'spacer' }),
+      h('button', { class: 'ghost icon', title: 'Copy a link that opens this comment — for anyone who has access to the project', onclick: (e: Event) => {
+        e.stopPropagation();
+        const link = this.link(t.id);
+        void copyText(link).then(() => toast('Link to this comment copied', 'ok', 1500), () => toast(link));
+      } }, 'Link'),
       t.resolved
         ? h('button', { class: 'ghost icon', title: 'Reopen this thread', onclick: () => void this.act({ op: 'reopen', id: t.id }) }, 'Reopen')
         : h('button', { class: 'ghost icon', title: 'Mark as resolved: hidden from the editor and PDF, kept in the list', onclick: () => void this.act({ op: 'resolve', id: t.id }).then((ok) => { if (ok && inPopover) this.closePopover(); }) }, '✓ Resolve'));
@@ -221,6 +240,11 @@ export class Comments {
 
   select(id: string | null): void {
     this.selected = id;
+    // A resolved thread is only in the list when it shows all threads.
+    if (id && this.filter === 'open' && this.threads.find((t) => t.id === id)?.resolved) {
+      this.filter = 'all';
+      this.renderPanel();
+    }
     this.panel.querySelectorAll('.thread-card').forEach((c) => c.classList.toggle('selected', (c as HTMLElement).dataset.id === id));
     if (id) this.panel.querySelector(`.thread-card[data-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'nearest' });
   }
