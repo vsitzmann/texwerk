@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import * as Y from 'yjs';
 import { Awareness } from 'y-protocols/awareness';
 import { colorFor, isBuildArtifact, isEditorTempFile, isTextFile } from '../shared/files.ts';
+import { isMassDeletion } from '../shared/deletionGuard.ts';
 import { Provider } from '../shared/provider.ts';
 import { BRIDGE_HEADER, type BinInfo, type CompileSummary, type ServerEvent } from '../shared/protocol.ts';
 import { applyEditsToYText, editsBetween } from '../shared/textDiff.ts';
@@ -28,7 +29,12 @@ import { chatArray, chatMarkdown } from '../shared/chat.ts';
  *    collaborators typed meanwhile. A save that races a remote edit is
  *    rebased through it, so neither side's change is lost;
  *  - binary files (figures) are downloaded and uploaded whole;
- *  - new, deleted and renamed files travel both ways.
+ *  - new, deleted and renamed files travel both ways — but a mirror never
+ *    empties the project: deletions wait a moment and go together, and are
+ *    dropped (with the files restored here) if the folder itself was deleted
+ *    or replaced, or if they would delete most of the project (see
+ *    flushDeletes). One folder is mirrored by one process (`.texwerk/lock`);
+ *    `node texwerk-connect.mjs --stop <folder>` stops it.
  *
  * Everything under `.texwerk/` is local only: the agent guide, a small `tw`
  * helper for compiling, the latest PDF and log. Editor swap files and LaTeX
@@ -43,19 +49,44 @@ const SETTLE_MS = 30;
 const MAX_DEFER_MS = 250;
 /** A new file must exist unchanged this long before it is uploaded. */
 const NEW_FILE_SETTLE_MS = 200;
+/** Local deletions are collected until none has come for this long. */
+const DELETE_QUIET_MS = 400;
 const LOCAL_DIR = '.texwerk';
+const LOCK_FILE = 'lock';
 
 function sha(data: Uint8Array | string): string {
   return createHash('sha256').update(data).digest('hex').slice(0, 40);
 }
 
 function usage(): never {
-  process.stderr.write('usage: node texwerk-connect.mjs \'<server>/?project=<name>\' [folder]\n');
+  process.stderr.write('usage: node texwerk-connect.mjs \'<server>/?project=<name>\' [folder]\n       node texwerk-connect.mjs --stop <folder>\n');
   process.exit(2);
+}
+
+/** The pid in `<folder>/.texwerk/lock`, if that process is still running. */
+function lockHolder(folder: string): number | null {
+  let pid: number;
+  try { pid = Number(JSON.parse(readFileSync(join(folder, LOCAL_DIR, LOCK_FILE), 'utf8')).pid); } catch { return null; }
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try { process.kill(pid, 0); } catch (err) { if ((err as NodeJS.ErrnoException).code !== 'EPERM') return null; }
+  // A stale lock whose pid now belongs to some other program is not a mirror
+  // (and must never be what --stop kills). Checkable where /proc exists.
+  try { if (!readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes('connect')) return null; } catch { /* no /proc */ }
+  return pid;
 }
 
 const [, , sessionArg, folderArg] = process.argv;
 if (!sessionArg || sessionArg === '-h' || sessionArg === '--help') usage();
+if (sessionArg === '--stop') {
+  if (!folderArg) usage();
+  const pid = lockHolder(resolve(folderArg));
+  if (pid === null) { process.stdout.write(`no mirror is running in ${resolve(folderArg)}\n`); process.exit(0); }
+  process.kill(pid, 'SIGTERM');
+  const deadline = Date.now() + 5000;
+  while (lockHolder(resolve(folderArg)) === pid && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  process.stdout.write(`stopped the mirror (pid ${pid}) in ${resolve(folderArg)}\n`);
+  process.exit(0);
+}
 const session = new URL(sessionArg);
 const projectParam = session.searchParams.get('project');
 if (!projectParam) usage();
@@ -88,6 +119,35 @@ function debug(message: string): void {
 
 function log(message: string): void {
   process.stdout.write(`[${new Date().toLocaleTimeString()}] ${message}\n`);
+}
+
+// ------------------------------------------------------------ the folder itself
+
+/**
+ * The mirror folder as it was when we started (device and inode of the folder
+ * and of its `.texwerk/`). If either is gone or replaced — `rm -rf` of the
+ * folder, a new mirror set up on the same path — every file in it looks
+ * deleted, and none of that may reach the server. The mirror stops instead.
+ */
+let folderId: string | null = null;
+let stopping = false;
+function currentFolderId(): string | null {
+  try {
+    const a = statSync(root);
+    const b = statSync(join(root, LOCAL_DIR));
+    return `${a.dev}:${a.ino}/${b.dev}:${b.ino}`;
+  } catch {
+    return null;
+  }
+}
+
+/** False (and the mirror stopping) once the folder was deleted or replaced. */
+function folderIntact(): boolean {
+  if (stopping) return false;
+  if (folderId === null || currentFolderId() === folderId) return true;
+  stopping = true;
+  log(`the mirror folder ${root} was deleted or replaced — stopping. Nothing was deleted on the server.`);
+  process.exit(1);
 }
 
 // ------------------------------------------------------------ replica
@@ -165,6 +225,7 @@ function ignored(rel: string): boolean {
 }
 
 async function writeAtomic(rel: string, data: string | Uint8Array): Promise<void> {
+  if (!folderIntact()) return;
   const target = abs(rel);
   await mkdir(dirname(target), { recursive: true });
   const tmp = join(dirname(target), `.texwerk-tmp-${process.pid}-${Math.random().toString(36).slice(2)}`);
@@ -180,6 +241,7 @@ async function writeAtomic(rel: string, data: string | Uint8Array): Promise<void
  * work for an edit.
  */
 function writeTextSync(rel: string, content: string, expectStamp?: string): boolean {
+  if (!folderIntact()) return false;
   const target = abs(rel);
   mkdirSync(dirname(target), { recursive: true });
   const tmp = join(dirname(target), `.texwerk-tmp-${process.pid}-${Math.random().toString(36).slice(2)}`);
@@ -394,7 +456,7 @@ function watchStructure(): void {
   });
   dirs.observe((event) => {
     for (const [key, change] of event.changes.keys) {
-      if (change.action === 'add') void mkdir(abs(key), { recursive: true });
+      if (change.action === 'add') { if (folderIntact()) void mkdir(abs(key), { recursive: true }); }
       else if (change.action === 'delete') {
         // Only remove the folder if it is empty; its files are handled above.
         setTimeout(() => void readdir(abs(key)).then((e) => { if (!e.length) void rm(abs(key), { recursive: true }); }).catch(() => {}), 200);
@@ -412,7 +474,7 @@ function scheduleLocal(rel: string, delay = LOCAL_DEBOUNCE_MS): void {
 }
 
 async function onLocalChange(rel: string): Promise<void> {
-  if (!ready || ignored(rel)) return;
+  if (!ready || ignored(rel) || !folderIntact()) return;
   let info;
   try { info = await stat(abs(rel)); } catch { info = null; }
 
@@ -421,12 +483,7 @@ async function onLocalChange(rel: string): Promise<void> {
     // removals — a file we just wrote and someone then deleted is a delete).
     const removed = selfRemoved.get(rel);
     if (removed && Date.now() - removed < 2000) return;
-    if (texts.has(rel) || bins.has(rel) || dirs.has(rel)) {
-      try {
-        await http('POST', '/api/fs', JSON.stringify({ op: 'delete', path: rel }));
-        log(`deleted ${rel} on the server`);
-      } catch (err) { log(String((err as Error).message)); }
-    }
+    if (texts.has(rel) || bins.has(rel) || dirs.has(rel)) queueDelete(rel);
     return;
   }
   if (info.isDirectory()) {
@@ -467,6 +524,62 @@ async function onLocalChange(rel: string): Promise<void> {
   }
 }
 
+// ------------------------------------------------------------ local deletions
+
+const pendingDeletes = new Set<string>();
+let deleteTimer: NodeJS.Timeout | null = null;
+
+function queueDelete(rel: string): void {
+  pendingDeletes.add(rel);
+  if (deleteTimer) clearTimeout(deleteTimer);
+  deleteTimer = setTimeout(() => { deleteTimer = null; void flushDeletes(); }, DELETE_QUIET_MS);
+}
+
+/**
+ * Send the deletions collected since the last quiet moment — unless the
+ * folder itself went away (stop), or they would delete most of the project
+ * (refuse, and put the files back here from the replica). See isMassDeletion.
+ */
+async function flushDeletes(): Promise<void> {
+  const batch = [...pendingDeletes].filter((p) => (texts.has(p) || bins.has(p) || dirs.has(p)) && !existsSync(abs(p)));
+  pendingDeletes.clear();
+  if (!batch.length || !folderIntact()) return;
+  const files = [...texts.keys(), ...bins.keys()];
+  const under = (p: string) => files.filter((f) => f === p || f.startsWith(`${p}/`));
+  const doomed = new Set(batch.flatMap(under));
+  if (isMassDeletion(doomed.size, files.length)) {
+    log(`refusing to delete ${doomed.size} of ${files.length} files on the server at once — restored them here. Delete them in the browser if you mean it.`);
+    for (const p of batch) await restoreLocal(p);
+    return;
+  }
+  // A deleted folder takes its files with it: one request for the folder.
+  for (const p of batch.filter((p) => !batch.some((q) => p.startsWith(`${q}/`)))) {
+    try {
+      await http('POST', '/api/fs', JSON.stringify({ op: 'delete', path: p }));
+      log(`deleted ${p} on the server`);
+    } catch (err) {
+      log(`${(err as Error).message} — restored ${p} here`);
+      await restoreLocal(p);
+    }
+  }
+}
+
+/** Write `rel` (a file, or a folder and everything in it) back from the replica. */
+async function restoreLocal(rel: string): Promise<void> {
+  const inside = (p: string) => p === rel || p.startsWith(`${rel}/`);
+  for (const d of dirs.keys()) if (inside(d)) await mkdir(abs(d), { recursive: true });
+  for (const [p, ytext] of texts) {
+    if (!inside(p)) continue;
+    const content = ytext.toString();
+    if (writeTextSync(p, content)) setShadow(p, content);
+  }
+  for (const [p, info] of bins) {
+    if (!inside(p)) continue;
+    binHash.delete(p);
+    await syncBinaryDown(p, info);
+  }
+}
+
 /** Show the agent's caret where it last edited, so people can see it working. */
 function pointCaretAt(path: string, ytext: Y.Text, edit: { at: number; insert: string }): void {
   const pos = Math.min(ytext.length, edit.at + edit.insert.length);
@@ -492,6 +605,7 @@ async function initialSync(): Promise<void> {
     process.exit(1);
   }
   const known = marker?.files ?? {};
+  if (!folderIntact()) return;
   for (const d of dirs.keys()) await mkdir(abs(d), { recursive: true });
   for (const [path, ytext] of texts) {
     observeText(path, ytext);
@@ -563,7 +677,11 @@ Other people are editing the same files right now, in their browsers.
 - Re-read a file before editing it if some time has passed — it may have
   changed underneath you.
 - New files and folders you create are added to the project; deleting a file
-  deletes it for everyone (it stays restorable from the history).
+  deletes it for everyone (it stays restorable from the history). Deleting
+  most of the project at once is refused and the files come back here.
+- Never delete this folder while the mirror runs. Stop it first with
+  \`node texwerk-connect.mjs --stop <this folder>\` (if the folder goes anyway,
+  the mirror stops and the server keeps everything).
 - Build products (*.aux, *.log, …) and anything under \`.texwerk/\` stay local.
 
 ## Comments
@@ -732,6 +850,7 @@ const show = (c) => {
 `;
 
 async function writeHelpers(): Promise<void> {
+  if (!folderIntact()) return;
   const dir = join(root, LOCAL_DIR);
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, 'AGENT.md'), agentGuide());
@@ -759,11 +878,24 @@ async function onCompile(c: CompileSummary): Promise<void> {
 
 async function main(): Promise<void> {
   await mkdir(join(root, LOCAL_DIR), { recursive: true });
+  const other = lockHolder(root);
+  if (other !== null && other !== process.pid) {
+    process.stderr.write(`another texwerk-connect (pid ${other}) is already mirroring into ${root}; stop it with: node texwerk-connect.mjs --stop ${root}\n`);
+    process.exit(1);
+  }
+  const lockPath = join(root, LOCAL_DIR, LOCK_FILE);
+  writeFileSync(lockPath, JSON.stringify({ pid: process.pid, project, origin }));
+  folderId = currentFolderId();
+  process.on('exit', () => {
+    try { if (lockHolder(root) === process.pid) unlinkSync(lockPath); } catch { /* folder gone */ }
+  });
   log(`mirroring "${project}" from ${origin} into ${root}`);
   startSession();
   watchTree(root, (rel) => scheduleLocal(rel), (rel) => ignored(rel) || rel.split('/').pop()!.startsWith('.texwerk-tmp-'));
-  setInterval(() => { if (ready) void saveMarker(); }, 10_000);
-  const stop = () => { void saveMarker().finally(() => process.exit(0)); };
+  // Also notice a deleted folder when nothing else happens.
+  setInterval(() => { folderIntact(); }, 1000);
+  setInterval(() => { if (ready && folderIntact()) void saveMarker(); }, 10_000);
+  const stop = () => { void (ready && folderIntact() ? saveMarker() : Promise.resolve()).finally(() => process.exit(0)); };
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
 }

@@ -24,7 +24,12 @@ No accounts. On a tailnet with `--access`, your tailnet login is your identity.
   a version that was already outdated (an agent read the file, someone typed,
   the agent saved) is merged against the version it came from, so it never
   reverts other people's work. The agent's caret shows up in the browser, and
-  its edits are attributed to "*you* · agent" in the history. Compile results
+  its edits are attributed to "*you* · agent" in the history. A mirror never
+  empties the project: deleting the mirrored folder stops the mirror (nothing
+  is deleted on the server), deleting most of the files in it at once is
+  refused and the files come back, one folder takes one mirror
+  (`.texwerk/lock`), and `node texwerk-connect.mjs --stop <folder>` stops it.
+  The server refuses such mass deletions from mirrors too. Compile results
   are mirrored to `.texwerk/output.pdf` / `.texwerk/output.log`, and
   `node .texwerk/tw compile` compiles on the server and prints the errors.
 - **LaTeX help while typing.** Enter after `\begin{itemize}` closes the
@@ -164,7 +169,8 @@ discards it instead of merging, which would duplicate every document.
 ## Tests
 
 ```bash
-npm test                                    # unit tests
+npm test                                    # unit tests, mirror safety, a short mirror fuzz
+npm run test:fuzz                           # the mirror fuzzer, 5 seeds x 60 steps (FUZZ_SEEDS=…)
 node test/e2e-bridge.ts <origin> <project> <mirrorDir>          # with a server and a running bridge
 node test/e2e-latex-editing.ts <origin> <projectsRoot>          # completion, Enter and vim in Chromium
 node test/e2e-links-and-sync.ts <origin>                        # comment links, double-click to PDF, lineno fix
@@ -174,6 +180,13 @@ MODE=all node test/stress-bridge.ts <origin> <project> <mirrorDir> 8
 The stress test has two collaborators typing while an "agent" rewrites the
 mirrored file every 60 ms (half in place, half by atomic rename), and checks
 that every edit survives and all copies converge.
+
+`test/mirror-safety.test.ts` and the fuzzer `test/mirror-fuzz.test.ts` run a
+real server and real mirrors and do to the mirror folder what people and agents
+do by accident — `rm -rf` it while the mirror runs, recreate it, delete most of
+its files, start a second mirror on it, delete files while it is stopped — and
+check that the server keeps exactly what it should. A fuzz failure prints its
+seed; rerun it with `FUZZ_SEEDS=<seed> npm run test:fuzz`.
 
 ## Limits
 

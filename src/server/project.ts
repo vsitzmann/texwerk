@@ -18,6 +18,7 @@ import { setYText } from '../shared/textDiff.ts';
 import { allThreads, type CommentMessage, type CommentThread, type ThreadMap } from '../shared/comments.ts';
 import { chatArray, cleanMessage, findMentions, fromJsonl, toJsonl, type ChatMessage, type ChatRef } from '../shared/chat.ts';
 import { authorRuns } from '../shared/provenance.ts';
+import { isMassDeletion, MASS_DELETION_WINDOW_MS } from '../shared/deletionGuard.ts';
 import { BUILD_DIR, runLatexmk } from './compile.ts';
 import { ensureRepo } from './git.ts';
 import { hashBytes, History } from './history.ts';
@@ -576,6 +577,26 @@ export class Project {
   async mkdir(path: string, author: string): Promise<void> {
     await mkdir(join(this.dir, path), { recursive: true });
     this.ensureParentDirs(`${path}/x`, { author });
+  }
+
+  /** Files mirrors deleted lately, for allowMirrorDelete. */
+  private mirrorDeletes: Array<{ at: number; count: number }> = [];
+
+  /**
+   * Whether a mirror may delete `path` now. A mirror that deletes file after
+   * file because its folder was removed (bridges from before the folder check
+   * do) is stopped before it deletes most of the project; people in the
+   * browser are never limited. Records the deletion when it is allowed.
+   */
+  allowMirrorDelete(path: string): boolean {
+    const now = Date.now();
+    this.mirrorDeletes = this.mirrorDeletes.filter((d) => now - d.at < MASS_DELETION_WINDOW_MS);
+    const files = [...this.texts.keys(), ...this.bins.keys()];
+    const count = files.filter((p) => p === path || p.startsWith(`${path}/`)).length;
+    const recent = this.mirrorDeletes.reduce((n, d) => n + d.count, 0);
+    if (isMassDeletion(recent + count, files.length + recent)) return false;
+    this.mirrorDeletes.push({ at: now, count });
+    return true;
   }
 
   async remove(path: string, author: string): Promise<void> {

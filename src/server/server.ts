@@ -707,6 +707,9 @@ export async function startServer(options: ServerOptions) {
         await project.putFile(rel, Buffer.alloc(0), who);
       } else if (body.op === 'delete') {
         if (!project.exists(rel)) throw new HttpError(404, `no "${rel}"`);
+        if (bridge && !project.allowMirrorDelete(rel)) {
+          throw new HttpError(409, `refusing to let a mirror delete most of the project ("${rel}"); delete it in the browser if you mean it`);
+        }
         await project.remove(rel, who);
       }
       else if (body.op === 'move') {

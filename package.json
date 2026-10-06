@@ -13,7 +13,8 @@
     "preserve": "npm run build",
     "serve": "node src/server/main.ts",
     "dev": "vite",
-    "test": "node --test test/unit.test.ts"
+    "test": "node --test --test-concurrency=1 test/unit.test.ts test/mirror-safety.test.ts && FUZZ_STEPS=12 node --test test/mirror-fuzz.test.ts",
+    "test:fuzz": "FUZZ_STEPS=60 FUZZ_SEEDS=${FUZZ_SEEDS:-1,2,3,4,5} node --test --test-concurrency=1 test/mirror-fuzz.test.ts"
   },
   "dependencies": {
     "fast-diff": "^1.3.0",
