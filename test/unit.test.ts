@@ -440,3 +440,32 @@ test('typing a closing bracket steps over an existing one only when balanced', a
   assert.equal(shouldStepOver('{a} % {\n', 2, '}'), true); // comment ignored
   assert.equal(shouldStepOver('\\{ {a}', 5, '}'), true); // escaped brace ignored
 });
+
+// ------------------------------------------------------------ spellcheck prose
+
+import { isExemptWord, latexProse, paragraphs } from '../src/shared/prose.ts';
+
+test('latexProse keeps prose at its offsets and blanks markup', () => {
+  const src = 'We show in \\cref{fig:teaser} that $x^2$ is \\emph{very} fast~\\citep[p.~3]{smith2020}. % a note\n'
+    + '\\begin{equation}\n  E = mc^2\n\\end{equation}\n\\section{Related Work}\n' + "``Quoted'' text \\href{https://x.y}{our site}.";
+  const prose = latexProse(src);
+  assert.equal(prose.length, src.length);
+  assert.equal(prose.split('\n').length, src.split('\n').length);
+  const words = prose.split(/\s+/).filter(Boolean);
+  assert.deepEqual(words, ['We', 'show', 'in', 'that', 'is', 'very', 'fast', '.', 'Related', 'Work', '"Quoted"', 'text', 'our', 'site', '.']);
+  // Each surviving word sits exactly where it is in the source.
+  const at = prose.indexOf('very');
+  assert.equal(src.slice(at, at + 4), 'very');
+});
+
+test('paragraphs splits at blank lines with offsets', () => {
+  const text = 'One two.\n\n  \nThree.\nFour.\n\n';
+  assert.deepEqual(paragraphs(text), [{ from: 0, text: 'One two.' }, { from: 13, text: 'Three.\nFour.' }]);
+});
+
+test('latexProse blanks settings; isExemptWord skips acronyms, numbers and initials', () => {
+  assert.equal(latexProse('\\setlist{leftmargin=1em}\\foo{width=3cm} ok').trim(), 'ok');
+  assert.equal(latexProse('\\def\\va{{\\bm{a}}}\\newcommand{\\R}[1]{\\mathbb{R}^{#1}} ok \\def\\foo#1{a #1} fine').replace(/\s+/g, ' ').trim(), 'ok fine');
+  for (const w of ['ICLR', 'FP8', 'H200', 'S.', "ORCD's", 'x']) assert.ok(isExemptWord(w), w);
+  for (const w of ['metod', 'Gradeint', 'NeRF']) assert.ok(!isExemptWord(w), w);
+});

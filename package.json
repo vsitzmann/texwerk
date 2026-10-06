@@ -37,6 +37,7 @@
     "@types/node": "^26.4.0",
     "@types/ws": "^8.18.1",
     "codemirror": "^6.0.2",
+    "harper.js": "^2.7.0",
     "pdfjs-dist": "^6.3.289",
     "playwright-core": "^1.62.1",
     "typescript": "^7.0.2",

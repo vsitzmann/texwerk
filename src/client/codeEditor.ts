@@ -19,6 +19,8 @@ import { vim, Vim, CodeMirror as VimCM } from '@replit/codemirror-vim';
 import type { Awareness } from 'y-protocols/awareness';
 import { extensionOf } from '@shared/files.ts';
 import { latexSupport, type LatexProject } from './latex.ts';
+import { spellcheck } from './spellcheck.ts';
+import { isProseFile } from '@shared/prose.ts';
 
 /**
  * A CodeMirror view bound to one Y.Text. Remote carets and selections come
@@ -221,6 +223,8 @@ export interface CodeEditorOptions {
   project?: Omit<LatexProject, 'path'>;
   /** Vim keybindings. */
   vim?: boolean;
+  /** Spelling and grammar checking (prose files only). */
+  spellcheck?: boolean;
   /** Start a comment on the selection. */
   onComment?: (from: number, to: number, rect: DOMRect) => void;
   /** Open the given thread(s), shown next to `rect`. */
@@ -246,10 +250,13 @@ export class CodeEditor {
   readonly path: string;
   private readonly undo: Y.UndoManager;
   private readonly vimMode = new Compartment();
+  private readonly spellMode = new Compartment();
+  private readonly prose: boolean;
 
   constructor(parent: HTMLElement, opts: CodeEditorOptions) {
     this.path = opts.path;
     this.undo = new Y.UndoManager(opts.ytext);
+    this.prose = isProseFile(opts.path);
     const ext = extensionOf(opts.path);
     const language: Extension[] = ['tex', 'sty', 'cls', 'ltx', 'bib', 'bbx', 'cbx', 'dtx', 'tikz'].includes(ext)
       ? [
@@ -304,6 +311,7 @@ export class CodeEditor {
           },
         }),
         ...language,
+        this.spellMode.of(opts.spellcheck && this.prose ? spellcheck() : []),
         keymap.of([
           { key: 'Mod-s', preventDefault: true, run: () => { opts.onCompile(); return true; } },
           { key: 'Mod-Enter', preventDefault: true, run: () => { opts.onCompile(); return true; } },
@@ -352,6 +360,10 @@ export class CodeEditor {
 
   setVim(on: boolean): void {
     this.view.dispatch({ effects: this.vimMode.reconfigure(on ? vim({ status: true }) : []) });
+  }
+
+  setSpellcheck(on: boolean): void {
+    this.view.dispatch({ effects: this.spellMode.reconfigure(on && this.prose ? spellcheck() : []) });
   }
 
   /** Colour the text by author; null turns the view off. */

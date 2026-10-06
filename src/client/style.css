@@ -781,3 +781,8 @@ button.busy { opacity: .75; cursor: progress; }
 .trash-row { display: flex; align-items: center; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line, rgba(127,127,127,.2)); }
 .trash-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .trash-name .muted { font-size: 12px; }
+
+/* Spelling and grammar (spellcheck.ts). */
+.cm-spell-error { text-decoration: underline wavy var(--danger); text-decoration-thickness: 1px; text-underline-offset: 3px; text-decoration-skip-ink: none; }
+.cm-spell-grammar { text-decoration: underline wavy var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; text-decoration-skip-ink: none; }
+.menu .menu-head.spell-message { text-transform: none; letter-spacing: 0; max-width: 320px; white-space: normal; }

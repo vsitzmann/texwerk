@@ -130,6 +130,17 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
         `${name} ${Math.round(s.chars / total * 100)}%`)));
   }
   doc.getMap('text').observeDeep(() => scheduleAuthors());
+  // Spelling and grammar, per browser; on unless turned off.
+  let spellOn = true;
+  try { spellOn = localStorage.getItem('texwerk-spellcheck') !== '0'; } catch { /* default on */ }
+  const spellBtn = h('button', { class: `ghost icon authors-toggle${spellOn ? ' on' : ''}`, title: 'Check spelling and grammar (right-click a flagged word for suggestions)' }, 'Spell');
+  spellBtn.addEventListener('click', () => {
+    spellOn = !spellOn;
+    spellBtn.classList.toggle('on', spellOn);
+    try { localStorage.setItem('texwerk-spellcheck', spellOn ? '1' : '0'); } catch { /* ignore */ }
+    current?.setSpellcheck(spellOn);
+  });
+
   // Vim keybindings, per browser.
   let vimOn = false;
   try { vimOn = localStorage.getItem('texwerk-vim') === '1'; } catch { /* default off */ }
@@ -468,6 +479,7 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
         readOnly,
         awareness,
         vim: vimOn,
+        spellcheck: spellOn,
         project: {
           texts: () => [...texts.entries()].map(([p, t]) => [p, () => t.toString()] as [string, () => string]),
           files: () => [...texts.keys(), ...bins.keys()],
@@ -492,6 +504,7 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
         h('span', { class: 'spacer' }),
         authorsLegend,
         authorsBtn,
+        spellBtn,
         vimBtn);
       updateAuthors();
       tree.select(path);

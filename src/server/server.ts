@@ -81,14 +81,14 @@ function contentDisposition(kind: 'inline' | 'attachment', name: string): string
   return `${kind}; filename="${name.replace(/[^\x20-\x7e]|"/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 }
 
-async function sendFile(request: IncomingMessage, response: ServerResponse, abs: string, opts: { download?: string; noStore?: boolean } = {}): Promise<void> {
+async function sendFile(request: IncomingMessage, response: ServerResponse, abs: string, opts: { download?: string; noStore?: boolean; immutable?: boolean } = {}): Promise<void> {
   let info;
   try { info = await stat(abs); } catch { throw new HttpError(404, 'not found'); }
   if (!info.isFile()) throw new HttpError(404, 'not found');
   const etag = `"${info.size.toString(36)}-${Math.floor(info.mtimeMs).toString(36)}"`;
   const headers: Record<string, string> = {
     'content-type': MIME[extname(abs).toLowerCase()] ?? 'application/octet-stream',
-    'cache-control': opts.noStore ? 'no-store' : 'no-cache',
+    'cache-control': opts.noStore ? 'no-store' : opts.immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
     etag,
     'accept-ranges': 'bytes',
   };
@@ -363,7 +363,9 @@ export async function startServer(options: ServerOptions) {
       const rel = path === '/' ? 'index.html' : path.slice(1);
       const abs = resolve(options.clientDir, rel);
       if (!abs.startsWith(options.clientDir) || !existsSync(abs)) return sendFile(request, response, join(options.clientDir, 'index.html'));
-      return sendFile(request, response, abs);
+      // Vite names everything under app/ by content hash, so it never changes
+      // (Harper's 16 MB dictionary would otherwise be revalidated on every load).
+      return sendFile(request, response, abs, { immutable: rel.startsWith('app/') });
     }
 
     // ---------------------------------------------------------- raw files

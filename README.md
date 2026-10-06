@@ -46,6 +46,13 @@ No accounts. On a tailnet with `--access`, your tailnet login is your identity.
   steps after 5 s of quiet or 1 minute of continuous editing). The History
   view groups changes by time and author, shows diffs, restores single files
   or the whole project to any point.
+- **Spelling and grammar as you type.** [Harper](https://writewithharper.com)
+  runs in a web worker in the browser, so no text leaves it. Only prose is
+  checked: commands, math, comments, citation keys and macro definitions are
+  skipped, and so are acronyms (ICLR), words with digits (FP8) and initials.
+  Right-click a flagged word for suggestions, **Add to dictionary** or
+  **Ignore**. The dictionary is per browser, and **Spell** in the editor
+  header turns checking off.
 - **Comments.** Select text and press **💬 Comment** (or Ctrl+Alt+M). The
   text gets a highlight in the author's colour and a speech-bubble mark in
   the gutter; the PDF gets a pin in the margin at the same place (via
