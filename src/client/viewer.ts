@@ -1,5 +1,8 @@
-import * as pdfjs from 'pdfjs-dist';
-import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+// The legacy build: the modern one calls Promise.try, Map#getOrInsertComputed
+// and the like unguarded, which older Safari lacks — the worker then dies and
+// no PDF ever appears. The legacy build polyfills them.
+import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
+import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist';
 import { extensionOf, IMAGE_EXTENSIONS } from '@shared/files.ts';
 import type { CompileIssue, CompileSummary } from '@shared/protocol.ts';
