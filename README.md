@@ -138,16 +138,7 @@ name, used for carets and the history. Either way, everyone who can reach the
 server can open and edit every project: this is for trusted networks. Never
 expose it with `tailscale funnel`.
 
-### As a system service (this machine)
-
-`deploy/` sets TeXWerk up the way DeckWerk runs here: its own `texwerk` user,
-projects under `/srv/texwerk/projects` (writable by you too), a sandboxed
-systemd unit, and `tailscale serve` on HTTPS port 10000.
-
-```bash
-sudo ./deploy/install.sh     # once: TeX Live, user, folders, node, build, service, tailscale serve
-sudo ./deploy/update.sh      # deploy the committed HEAD of this checkout and restart
-```
+### Restarting
 
 A restart persists every open project first, including the collaborative
 document itself (`.texwerk/ydoc.bin`), which is reloaded on start — so open
