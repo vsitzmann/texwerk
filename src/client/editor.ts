@@ -534,29 +534,43 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
 
   // ------------------------------------------------------------ presence
   function renderPresence(): void {
-    const people: Array<{ id: number; state: PeerState }> = [];
+    // One avatar per person, not per tab: the same person in two tabs or on
+    // two machines is one entry (name and colour, which comes from the login;
+    // a mirror is "… · agent", so it stays separate). Following a person goes
+    // to the session that moved most recently.
+    const states = awareness.getStates() as Map<number, PeerState>;
+    const personKey = (u: NonNullable<PeerState['user']>) => `${u.name}|${u.color}`;
+    const mine = states.get(doc.clientID)?.user;
+    const myKey = mine ? personKey(mine) : null;
+    const lastUpdated = (id: number) => awareness.meta.get(id)?.lastUpdated ?? 0;
+    const people = new Map<string, { isMe: boolean; user: NonNullable<PeerState['user']>; sessions: Array<{ id: number; state: PeerState }> }>();
     const byFile = new Map<string, string[]>();
-    for (const [id, state] of awareness.getStates() as Map<number, PeerState>) {
+    for (const [id, state] of states) {
       if (!state.user) continue;
-      people.push({ id, state });
-      if (id !== doc.clientID && state.file) {
+      const key = personKey(state.user);
+      const isMe = id === doc.clientID || key === myKey;
+      const person = people.get(key) ?? { isMe, user: state.user, sessions: [] };
+      person.sessions.push({ id, state });
+      people.set(key, person);
+      if (!isMe && state.file) {
         const list = byFile.get(state.file) ?? [];
-        list.push(`${state.user.name}|${state.user.color}`);
+        if (!list.includes(key)) list.push(key);
         byFile.set(state.file, list);
       }
     }
     tree.setPresence(byFile);
-    people.sort((a, b) => (a.id === doc.clientID ? -1 : b.id === doc.clientID ? 1 : a.state.user!.name.localeCompare(b.state.user!.name)));
-    presenceEl.replaceChildren(...people.map(({ id, state }) => {
-      const u = state.user!;
-      const isMe = id === doc.clientID;
+    const sorted = [...people.values()].sort((a, b) => (a.isMe ? -1 : b.isMe ? 1 : a.user.name.localeCompare(b.user.name)));
+    presenceEl.replaceChildren(...sorted.map(({ isMe, user: u, sessions }) => {
       const agent = Boolean(u.agent) || / · agent$/.test(u.name);
+      const active = sessions.filter((s) => s.id !== doc.clientID && s.state.file).sort((a, b) => lastUpdated(b.id) - lastUpdated(a.id))[0];
+      const files = [...new Set(sessions.map((s) => s.state.file).filter(Boolean))].join(', ');
+      const elsewhere = isMe && sessions.length > 1 ? `, also open in ${sessions.length - 1} other window${sessions.length > 2 ? 's' : ''}` : '';
       const node = h('span', {
         class: `person${isMe ? ' me' : ''}${agent ? ' agent' : ''}`,
         style: `background:${u.color}`,
-        title: `${u.name}${isMe ? ' (you)' : ''}${state.file ? ` — ${state.file}` : ''}`,
+        title: `${u.name}${isMe ? ` (you${elsewhere})` : ''}${files ? ` — ${files}` : ''}`,
       }, agent ? '⚙' : initials(u.name));
-      if (!isMe && state.file) node.addEventListener('click', () => followPeer(state));
+      if (!isMe && active) node.addEventListener('click', () => followPeer(active.state));
       return node;
     }));
   }
