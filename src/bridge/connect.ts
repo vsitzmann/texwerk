@@ -580,12 +580,28 @@ async function restoreLocal(rel: string): Promise<void> {
   }
 }
 
+/**
+ * How long the agent's caret stays after its last edit. An agent that
+ * finished its work should not leave a caret in everyone's editor; the next
+ * edit brings it back.
+ */
+const CARET_IDLE_MS = Number(process.env.TEXWERK_CARET_IDLE_MS) || 20_000;
+let caretTimer: NodeJS.Timeout | null = null;
+
 /** Show the agent's caret where it last edited, so people can see it working. */
 function pointCaretAt(path: string, ytext: Y.Text, edit: { at: number; insert: string }): void {
   const pos = Math.min(ytext.length, edit.at + edit.insert.length);
   const rel = Y.createRelativePositionFromTypeIndex(ytext, pos);
   awareness.setLocalStateField('file', path);
   awareness.setLocalStateField('cursor', { anchor: Y.relativePositionToJSON(rel), head: Y.relativePositionToJSON(rel) });
+  if (caretTimer) clearTimeout(caretTimer);
+  caretTimer = setTimeout(() => {
+    caretTimer = null;
+    // The agent stays in the presence list; only its caret goes.
+    awareness.setLocalStateField('cursor', null);
+    awareness.setLocalStateField('file', null);
+  }, CARET_IDLE_MS);
+  caretTimer.unref();
 }
 
 // ------------------------------------------------------------ initial sync

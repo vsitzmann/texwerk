@@ -184,3 +184,39 @@ test('the server refuses mass deletion from a mirror, but not from the browser',
     await h.close();
   }
 });
+
+test("the agent's caret shows where it edited, goes away when the agent is idle, and with the mirror", async () => {
+  const { Awareness } = await import('y-protocols/awareness');
+  const Y = await import('yjs');
+  const { Provider } = await import('../src/shared/provider.ts');
+  process.env.TEXWERK_CARET_IDLE_MS = '1500';
+  const h = await harness();
+  const doc = new Y.Doc();
+  const awareness = new Awareness(doc);
+  const provider = new Provider({ url: `${h.origin.replace('http', 'ws')}/ws?project=Paper&name=Bob`, doc, awareness });
+  type Peer = { user?: { agent?: boolean }; cursor?: unknown; file?: string | null };
+  const agent = () => [...(awareness.getStates() as Map<number, Peer>).values()].find((s) => s.user?.agent);
+  try {
+    // No compiles running into the end of the test.
+    await fetch(`${h.origin}/api/settings?project=Paper&name=Bob`, { method: 'POST', body: JSON.stringify({ autoCompile: false }) });
+    const folder = join(h.root, 'mirror');
+    const bridge = await mirrored(h, folder);
+    await until('agent present', () => Boolean(agent()));
+    assert.equal(agent()!.cursor ?? null, null, 'no caret before the agent edits anything');
+    await writeFile(join(folder, 'main.tex'), FILES['main.tex'].replace('Hello.', 'Hello, agent.'));
+    await until('agent caret shown', () => Boolean(agent()?.cursor) && agent()?.file === 'main.tex');
+    const shownAt = Date.now();
+    await until('agent caret gone after idling', () => agent() !== undefined && !agent()!.cursor, 5000);
+    assert.ok(Date.now() - shownAt > 1000, 'the caret stays while the agent is working');
+    // The next edit brings it back; stopping the mirror removes the agent altogether.
+    await writeFile(join(folder, 'main.tex'), FILES['main.tex'].replace('Hello.', 'Hello again.'));
+    await until('agent caret back', () => Boolean(agent()?.cursor));
+    bridge.kill('SIGTERM');
+    await until('agent gone with the mirror', () => agent() === undefined);
+  } finally {
+    delete process.env.TEXWERK_CARET_IDLE_MS;
+    provider.destroy();
+    doc.destroy();
+    await h.close();
+  }
+});

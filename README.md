@@ -23,8 +23,9 @@ No accounts. On a tailnet with `--access`, your tailnet login is your identity.
   merged character by character with what others are typing. A save built on
   a version that was already outdated (an agent read the file, someone typed,
   the agent saved) is merged against the version it came from, so it never
-  reverts other people's work. The agent's caret shows up in the browser, and
-  its edits are attributed to "*you* · agent" in the history. A mirror never
+  reverts other people's work. The agent's caret shows up in the browser
+  where it last edited and goes away after 20 seconds without an edit (or
+  when the mirror stops); its edits are attributed to "*you* · agent" in the history. A mirror never
   empties the project: deleting the mirrored folder stops the mirror (nothing
   is deleted on the server), deleting most of the files in it at once is
   refused and the files come back, one folder takes one mirror
