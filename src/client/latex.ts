@@ -4,6 +4,7 @@ import {
   autocompletion, closeCompletion, completionStatus, selectedCompletion, snippet, startCompletion,
   type Completion, type CompletionContext, type CompletionResult,
 } from '@codemirror/autocomplete';
+import { bareEntry, cleanBibText, fieldText, parseBib, searchBib, snippet as window_, type BibEntry, type BibField, type BibMatch } from './bibtex.ts';
 
 /**
  * LaTeX editing help: completion of commands, environments, labels,
@@ -231,7 +232,8 @@ function latexEnter(view: EditorView): boolean {
 const COMMANDS = [
   'section{}', 'subsection{}', 'subsubsection{}', 'paragraph{}', 'chapter{}', 'part{}', 'section*{}', 'subsection*{}',
   'label{}', 'ref{}!', 'eqref{}!', 'cref{}!', 'Cref{}!', 'autoref{}!', 'pageref{}!', 'nameref{}!',
-  'cite{}!', 'citep{}!', 'citet{}!', 'citeauthor{}!', 'citeyear{}!', 'parencite{}!', 'textcite{}!', 'autocite{}!', 'nocite{}!',
+  'cite{}!', 'citep{}!', 'citet{}!', 'citealp{}!', 'citeauthor{}!', 'citeyear{}!', 'parencite{}!', 'textcite{}!', 'autocite{}!',
+  'footcite{}!', 'nocite{}!',
   'begin{}!', 'end{}!', 'item', 'usepackage{}!', 'documentclass{}', 'input{}!', 'include{}!',
   'includegraphics[${2:width=\\linewidth}]{${1}}!', 'bibliography{}!', 'bibliographystyle{}', 'addbibresource{}!',
   'emph{}', 'textbf{}', 'textit{}', 'texttt{}', 'textsc{}', 'textrm{}', 'textsf{}', 'underline{}', 'footnote{}',
@@ -295,7 +297,7 @@ interface FileFacts {
   labels: { name: string; line: number }[];
   commands: { name: string; args: number }[];
   envs: string[];
-  cites: { key: string; title?: string }[];
+  cites: BibEntry[];
 }
 
 const factsCache = new Map<string, FileFacts>();
@@ -305,13 +307,7 @@ function factsOf(path: string, src: string): FileFacts {
   if (hit && hit.src === src) return hit;
   const facts: FileFacts = { src, labels: [], commands: [], envs: [], cites: [] };
   if (path.endsWith('.bib')) {
-    const entries = [...src.matchAll(/@(\w+)\s*[{(]\s*([^,\s{}]+)\s*,/g)]
-      .filter((m) => !/^(comment|string|preamble)$/i.test(m[1]));
-    entries.forEach((m, i) => {
-      const chunk = src.slice(m.index, entries[i + 1]?.index ?? src.length);
-      const title = /\btitle\s*=\s*[{"](.*)/i.exec(chunk)?.[1].replace(/[{}"]/g, '').replace(/,\s*$/, '').trim();
-      facts.cites.push({ key: m[2], title: title && title.length > 70 ? title.slice(0, 68) + '…' : title });
-    });
+    facts.cites = parseBib(src);
   } else {
     const clean = stripComments(src);
     const lineAt = (i: number) => clean.slice(0, i).split('\n').length;
@@ -324,7 +320,12 @@ function factsOf(path: string, src: string): FileFacts {
     }
     // \end, not \begin: the \begin{figu} being typed is not an environment yet.
     for (const m of clean.matchAll(/\\(?:newenvironment|newtheorem|end)\s*\{([^{}\s]+)\}/g)) facts.envs.push(m[1]);
-    for (const m of clean.matchAll(/\\bibitem\s*(?:\[[^\]]*\])?\s*\{([^{}]+)\}/g)) facts.cites.push({ key: m[1] });
+    for (const m of clean.matchAll(/\\bibitem\s*(?:\[[^\]]*\])?\s*\{([^{}]+)\}([^]*?)(?=\\bibitem|\\end\s*\{thebibliography\}|$)/g)) {
+      // The text of the item is searchable as its "title".
+      const entry = bareEntry(m[1], m[0].trim());
+      entry.title = cleanBibText(m[2]).slice(0, 300);
+      facts.cites.push(entry);
+    }
   }
   factsCache.set(path, facts);
   return facts;
@@ -381,18 +382,8 @@ function argumentOptions(kind: ArgKind, project: LatexProject, context: Completi
       }
       return out;
     }
-    case 'cite': {
-      const seen = new Set<string>();
-      const out: Completion[] = [];
-      for (const { facts } of projectFacts(project)) {
-        for (const c of facts.cites) {
-          if (seen.has(c.key)) continue;
-          seen.add(c.key);
-          out.push({ label: c.key, type: 'text', detail: c.title });
-        }
-      }
-      return out;
-    }
+    case 'cite':
+      return []; // see citeResult
     case 'tex':
       return project.files().filter((f) => f.endsWith('.tex') && f !== project.path)
         .map((f) => ({ label: f.slice(0, -4), type: 'file' }));
@@ -440,6 +431,7 @@ function latexCompletions(project: LatexProject) {
     // Keys in a list (\cite{a, b}) complete one at a time.
     const list = kind === 'ref' || kind === 'cite' || kind === 'package';
     const keyStart = list ? inside.lastIndexOf(',') + 1 + /^\s*/.exec(inside.slice(inside.lastIndexOf(',') + 1))![0].length : 0;
+    if (kind === 'cite') return citeResult(project, arg.to - inside.length + keyStart, inside.slice(keyStart));
     return {
       from: arg.to - inside.length + keyStart,
       options: argumentOptions(kind, project, context),
@@ -448,12 +440,107 @@ function latexCompletions(project: LatexProject) {
   };
 }
 
+// ------------------------------------------------------------ citations
+
+/** Every citable entry of the project: .bib entries and \bibitems, first one per key. */
+function projectCites(project: LatexProject): BibEntry[] {
+  const seen = new Set<string>();
+  const out: BibEntry[] = [];
+  for (const { facts } of projectFacts(project)) {
+    for (const e of facts.cites) {
+      if (seen.has(e.key)) continue;
+      seen.add(e.key);
+      out.push(e);
+    }
+  }
+  return out;
+}
+
+const citeMatches = new WeakMap<Completion, BibMatch>();
+
+/**
+ * \cite{…: a fuzzy search over key, authors, title, year and venue of every
+ * entry (words separated by spaces each have to match). We rank, so
+ * CodeMirror must not filter; without validFor it asks again on every key.
+ * Picking an entry inserts its key.
+ */
+function citeResult(project: LatexProject, from: number, query: string): CompletionResult | null {
+  const matches = searchBib(projectCites(project), query);
+  if (!matches.length) return null;
+  return {
+    from,
+    filter: false,
+    options: matches.map((m) => {
+      const c: Completion = {
+        label: m.entry.key,
+        type: 'text',
+        apply: m.entry.key,
+        info: () => {
+          const pre = document.createElement('pre');
+          pre.className = 'cm-cite-raw';
+          pre.textContent = m.entry.raw.trim();
+          return pre;
+        },
+      };
+      citeMatches.set(c, m);
+      return c;
+    }),
+    getMatch: (c) => citeMatches.get(c)?.hits.find((h) => h.field === 'key')?.ranges.flat() ?? [],
+  };
+}
+
+/** Under each citation key: title, authors, venue and year, with what matched marked and named. */
+function renderCite(c: Completion): Node | null {
+  const m = citeMatches.get(c);
+  if (!m) return null;
+  const e = m.entry;
+  const el = (tag: string, cls: string, ...kids: (Node | string)[]) => {
+    const n = document.createElement(tag);
+    n.className = cls;
+    n.append(...kids);
+    return n;
+  };
+  const part = (field: BibField, max: number): Node[] => {
+    const text = fieldText(e, field);
+    if (!text) return [];
+    const hit = m.hits.find((h) => h.field === field);
+    const cut = window_(text, hit?.ranges ?? [], max);
+    const out: Node[] = [];
+    if (hit) out.push(el('span', 'cm-cite-tag', field));
+    let at = 0;
+    for (const [a, b] of cut.ranges) {
+      out.push(document.createTextNode(cut.text.slice(at, a)), el('mark', '', cut.text.slice(a, b)));
+      at = b;
+    }
+    out.push(document.createTextNode(cut.text.slice(at)));
+    return out;
+  };
+  const meta: Node[] = [];
+  for (const [field, max] of [['author', 60], ['venue', 40], ['year', 4]] as [BibField, number][]) {
+    const p = part(field, max);
+    if (!p.length) continue;
+    if (meta.length) meta.push(document.createTextNode(' · '));
+    meta.push(...p);
+  }
+  const box = el('div', 'cm-cite');
+  if (e.title) box.append(el('div', 'cm-cite-title', ...part('title', 90)));
+  if (meta.length) box.append(el('div', 'cm-cite-meta', ...meta));
+  return box;
+}
+
 // ------------------------------------------------------------ extension
 
 /**
  * Enter when the word before the caret already is the selected completion
- * (\item⏎, a finished \cite key): close the list and let Enter be Enter.
+ * and picking it would add nothing (\item⏎, \centering⏎, a finished \cite
+ * key): close the list and let Enter be Enter. A completion that does add
+ * something — \cite gets its braces, \section its argument, an environment
+ * its \end — is still picked by Enter, even when its name is typed in full.
  */
+export function enterIsNewline(picked: Completion, typed: string): boolean {
+  return typed === picked.label && (picked.apply === undefined || picked.apply === picked.label);
+}
+
 function enterPastCompletion(view: EditorView): boolean {
   const { state } = view;
   const picked = completionStatus(state) === 'active' ? selectedCompletion(state) : null;
@@ -461,7 +548,7 @@ function enterPastCompletion(view: EditorView): boolean {
   const head = state.selection.main.head;
   const line = state.doc.lineAt(head);
   const typed = /[^\s\\{},[\]]*$/.exec(line.text.slice(0, head - line.from))![0];
-  if (typed !== picked.label) return false;
+  if (!enterIsNewline(picked, typed)) return false;
   closeCompletion(view);
   return false;
 }
@@ -508,7 +595,7 @@ export function latexSupport(project: LatexProject): Extension {
   return [
     Prec.highest(keymap.of([{ key: 'Enter', run: enterPastCompletion }])),
     Prec.high(stepOverClosing),
-    autocompletion({ override: [latexCompletions(project)], icons: false }),
+    autocompletion({ override: [latexCompletions(project)], icons: false, addToOptions: [{ render: renderCite, position: 90 }] }),
     keymap.of([{ key: 'Enter', run: latexEnter }]),
     // LaTeX quotes are `` and '', not pairs of ' or ".
     EditorState.languageData.of(() => [{ closeBrackets: { brackets: ['(', '[', '{'] } }]),

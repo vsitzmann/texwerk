@@ -37,10 +37,22 @@ No accounts. On a tailnet with `--access`, your tailnet login is your identity.
   environment and puts an `\item` inside; Enter on an item starts the next
   one, and Enter on an empty last item leaves the list. Picking an
   environment from the completion list inserts it whole, with Tab stops
-  (a figure gets placement, file, caption and label). `\ref{` lists the
-  project's labels, `\cite{` the keys of its .bib files, `\includegraphics{`
-  / `\input{` its files, and `\` the usual commands plus the project's own
-  `\newcommand`s. Renaming a `\begin{…}` from the list renames its `\end`.
+  (a figure gets placement, file, caption and label). Enter or a click picks
+  a completion, also one typed out in full (`\cite`⏎ gives `\cite{}` with
+  the caret inside) unless picking it adds nothing (`\item`⏎ is Enter).
+  `\ref{` lists the project's labels, `\includegraphics{` / `\input{` its
+  files, and `\` the usual commands plus the project's own `\newcommand`s.
+  Renaming a `\begin{…}` from the list renames its `\end`.
+- **Citations.** `\cite{` (and `\citep`, `\citet`, `\autocite`,
+  `\parencite`, `\textcite`, `\citeauthor`, …) searches every entry of the
+  project's .bib files (and `\bibitem`s) by key, authors, title, venue and
+  year, fuzzily and ignoring accents: `sitz`, `zollhof`, `radiance`,
+  `sitzmann 2024` (every word has to match). Key prefixes rank first, then
+  last names, then title words. Each candidate shows its title, authors,
+  venue and year, which field matched (with the matched letters marked), and
+  the raw BibTeX entry beside the list. Picking one inserts the key; in
+  `\cite{a, b, …}` each key completes on its own. .bib files are parsed once
+  per change, and a search over thousands of entries takes milliseconds.
 - **Vim keybindings**, switched on per browser with **Vim** above the editor.
   `:w` compiles; `u` / `Ctrl+R` are the same per-person undo as `Ctrl+Z`.
 - **Full edit history.** Every version of every file is kept (coalesced into

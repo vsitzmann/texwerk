@@ -36,6 +36,13 @@ x
 `;
 const BIB = `@article{sitzmann2019srn,
   title={Scene Representation Networks},
+  author={Sitzmann, Vincent and Zollh{\\"o}fer, Michael and Wetzstein, Gordon},
+  booktitle={NeurIPS}, year={2019},
+}
+@inproceedings{mildenhall2020nerf,
+  title={NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis},
+  author={Mildenhall, Ben and Srinivasan, Pratul P. and Tancik, Matthew},
+  booktitle={ECCV}, year={2020},
 }
 `;
 
@@ -141,6 +148,35 @@ try {
     assert.ok((await options()).includes('vect'));
     await page.keyboard.press('Escape');
     assert.equal(await body(), 'see \\ref{} \\cite{sitzmann2019srn} \\vec\n');
+  });
+
+  await check('a command typed out in full is still picked by Enter: \\cite⏎ → \\cite{|}', async () => {
+    await fresh();
+    await type(page, '\\cite');
+    assert.ok((await options()).includes('cite'));
+    await page.keyboard.press('Enter');
+    // The braces come with the caret inside, and the keys are listed.
+    assert.ok((await options()).includes('sitzmann2019srn'));
+    await type(page, 'radiance');
+    assert.deepEqual(await options(), ['mildenhall2020nerf']);
+    await page.keyboard.press('Enter');
+    assert.equal(await body(), '\\cite{mildenhall2020nerf}\n');
+  });
+
+  await check('\\citep{ searches authors and titles, shows the entry and what matched, one key at a time', async () => {
+    await fresh();
+    await type(page, '\\citep{mildenhall2020nerf, zollh');
+    assert.deepEqual(await options(), ['sitzmann2019srn']);
+    const shown = await page.$eval('.cm-tooltip-autocomplete li[aria-selected]', (li) => ({
+      text: li.textContent, tag: li.querySelector('.cm-cite-tag')?.textContent, mark: li.querySelector('.cm-cite mark')?.textContent,
+    }));
+    assert.equal(shown.tag, 'author');
+    assert.equal(shown.mark, 'Zollh');
+    assert.ok(shown.text!.includes('Scene Representation Networks') && shown.text!.includes('NeurIPS') && shown.text!.includes('2019'), shown.text!);
+    await page.waitForSelector('.cm-completionInfo .cm-cite-raw');
+    assert.match(await page.textContent('.cm-completionInfo .cm-cite-raw') ?? '', /^@article\{sitzmann2019srn,/);
+    await page.keyboard.press('Enter');
+    assert.equal(await body(), '\\citep{mildenhall2020nerf, sitzmann2019srn}\n');
   });
 
   await check('\\\\ then Enter is a line break, not a completion', async () => {

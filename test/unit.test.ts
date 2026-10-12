@@ -469,3 +469,99 @@ test('latexProse blanks settings; isExemptWord skips acronyms, numbers and initi
   for (const w of ['ICLR', 'FP8', 'H200', 'S.', "ORCD's", 'x']) assert.ok(isExemptWord(w), w);
   for (const w of ['metod', 'Gradeint', 'NeRF']) assert.ok(!isExemptWord(w), w);
 });
+
+// ------------------------------------------------------------ citations
+
+const BIB = String.raw`@string{neurips = "Advances in Neural Information Processing Systems"}
+@inproceedings{sitzmann2019srn,
+  title={Scene Representation Networks: Continuous {3D}-Structure-Aware Neural Scene Representations},
+  author={Sitzmann, Vincent and Zollh{\"o}fer, Michael and Wetzstein, Gordon},
+  booktitle=neurips,
+  year={2019}
+}
+@comment{ @article{commented, title={Not an entry}} }
+@article(mildenhall2020nerf,
+  title = "{NeRF}: Representing Scenes as Neural Radiance Fields for View Synthesis",
+  author = "Ben Mildenhall and Pratul P. Srinivasan and Matthew Tancik",
+  journal = {ECCV}, year = 2020)
+@misc{charatan2024pixelsplat, author={David Charatan and Sizhe Li and Vincent Sitzmann}, title={pixelSplat: 3D Gaussian Splats}, year={2024}}
+`;
+
+test('parseBib reads keys, authors, titles, venues and the raw entry', async () => {
+  const { parseBib } = await import('../src/client/bibtex.ts');
+  const entries = parseBib(BIB);
+  assert.deepEqual(entries.map((e) => e.key), ['sitzmann2019srn', 'mildenhall2020nerf', 'charatan2024pixelsplat']);
+  const [srn, nerf] = entries;
+  assert.equal(srn.authors, 'Vincent Sitzmann, Michael Zollhöfer, Gordon Wetzstein');
+  assert.deepEqual(srn.lastNames.map(([a, b]) => srn.authors.slice(a, b)), ['Sitzmann', 'Zollhöfer', 'Wetzstein']);
+  assert.equal(srn.title, 'Scene Representation Networks: Continuous 3D-Structure-Aware Neural Scene Representations');
+  assert.equal(srn.venue, 'Advances in Neural Information Processing Systems', '@string macros are resolved');
+  assert.equal(srn.year, '2019');
+  assert.ok(srn.raw.startsWith('@inproceedings{sitzmann2019srn,') && srn.raw.endsWith('}'));
+  assert.equal(nerf.title, 'NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis');
+  assert.equal(nerf.venue, 'ECCV');
+  assert.equal(nerf.year, '2020');
+  assert.deepEqual(nerf.lastNames.map(([a, b]) => nerf.authors.slice(a, b)), ['Mildenhall', 'Srinivasan', 'Tancik']);
+});
+
+test('searchBib ranks key prefixes, last names and title words, and says what matched where', async () => {
+  const { parseBib, searchBib, fieldText } = await import('../src/client/bibtex.ts');
+  const entries = parseBib(BIB);
+  const keys = (q: string) => searchBib(entries, q).map((m) => m.entry.key);
+  const hit = (q: string, key: string) => {
+    const m = searchBib(entries, q).find((x) => x.entry.key === key)!;
+    return m.hits.map((h) => `${h.field}:${h.ranges.map(([a, b]) => fieldText(m.entry, h.field).slice(a, b)).join('|')}`);
+  };
+  assert.deepEqual(keys(''), ['sitzmann2019srn', 'mildenhall2020nerf', 'charatan2024pixelsplat'], 'everything, in file order');
+  // The key prefix first, then the paper where Sitzmann is a co-author.
+  assert.deepEqual(keys('sitz'), ['sitzmann2019srn', 'charatan2024pixelsplat']);
+  assert.deepEqual(hit('sitz', 'charatan2024pixelsplat'), ['author:Sitz']);
+  // Accents don't matter.
+  assert.deepEqual(hit('zollhof', 'sitzmann2019srn'), ['author:Zollhöf']);
+  assert.deepEqual(keys('radiance'), ['mildenhall2020nerf']);
+  assert.deepEqual(hit('radiance', 'mildenhall2020nerf'), ['title:Radiance']);
+  assert.deepEqual(keys('neural information'), ['sitzmann2019srn']);
+  assert.deepEqual(hit('eccv', 'mildenhall2020nerf'), ['venue:ECCV']);
+  // Every word has to match somewhere.
+  assert.deepEqual(keys('sitzmann 2024'), ['charatan2024pixelsplat']);
+  assert.deepEqual(keys('sitzmann gaussian'), ['charatan2024pixelsplat']);
+  assert.deepEqual(keys('sitzmann radiance'), []);
+  // Letters of the key in order.
+  assert.deepEqual(keys('mildnerf'), ['mildenhall2020nerf']);
+});
+
+test('searchBib stays fast on thousands of entries', async () => {
+  const { parseBib, searchBib } = await import('../src/client/bibtex.ts');
+  const big = Array.from({ length: 5000 }, (_, i) => `@article{author${i}paper,\n  title={A Study of Topic Number ${i} in Neural Fields},\n  author={Lastname${i}, First and Other, Person},\n  journal={Journal ${i % 50}},\n  year={${1990 + (i % 35)}}\n}\n`).join('');
+  let t = performance.now();
+  const entries = parseBib(big);
+  const parseMs = performance.now() - t;
+  assert.equal(entries.length, 5000);
+  searchBib(entries, 'warm');
+  t = performance.now();
+  for (const q of ['a', 'lastname42', 'neural fields', 'journal 7', 'zzz']) searchBib(entries, q);
+  const searchMs = (performance.now() - t) / 5;
+  assert.ok(parseMs < 1000, `parse took ${parseMs} ms`);
+  assert.ok(searchMs < 100, `a search took ${searchMs} ms`);
+});
+
+test('snippet cuts long fields around the match', async () => {
+  const { snippet } = await import('../src/client/bibtex.ts');
+  const text = 'A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, Vincent Sitzmann, X, Y, Z, and many more people';
+  const at = text.indexOf('Sitzmann');
+  const cut = snippet(text, [[at, at + 4]], 40);
+  assert.ok(cut.text.startsWith('…') && cut.text.length <= 42, cut.text);
+  assert.equal(cut.text.slice(cut.ranges[0][0], cut.ranges[0][1]), 'Sitz');
+});
+
+test('Enter picks a completion typed out in full, unless picking it would add nothing', async () => {
+  const { enterIsNewline } = await import('../src/client/latex.ts');
+  const fn = () => {};
+  // \cite⏎ → \cite{} (its apply adds the braces); \cit⏎ too, of course.
+  assert.equal(enterIsNewline({ label: 'cite', apply: fn }, 'cite'), false);
+  assert.equal(enterIsNewline({ label: 'cite', apply: fn }, 'cit'), false);
+  // \item⏎, \centering⏎ and a finished \cite key are just Enter.
+  assert.equal(enterIsNewline({ label: 'item', apply: 'item' }, 'item'), true);
+  assert.equal(enterIsNewline({ label: 'sitzmann2019srn', apply: 'sitzmann2019srn' }, 'sitzmann2019srn'), true);
+  assert.equal(enterIsNewline({ label: 'sec:intro' }, 'sec:intro'), true);
+});
