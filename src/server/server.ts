@@ -159,8 +159,9 @@ Start writing here.
 export async function startServer(options: ServerOptions) {
   const rootDir = resolve(options.rootDir);
   await mkdir(rootDir, { recursive: true });
-  if (!setupCompileSandbox(rootDir)) {
-    process.stderr.write('warning: compiles are not sandboxed (bubblewrap is missing or cannot create namespaces here), so a document can read any file this server can read, other projects included.\n');
+  const unsandboxed = setupCompileSandbox(rootDir);
+  if (unsandboxed) {
+    process.stderr.write(`warning: compiles are not sandboxed (bubblewrap: ${unsandboxed}), so a document can read any file this server can read, other projects included.\n`);
   }
   const projects = new Map<string, Promise<Project>>();
   /** Projects whose folder is being renamed: nobody may (re)open the old id meanwhile. */
