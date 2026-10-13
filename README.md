@@ -199,11 +199,16 @@ The server listens on port 5810, every interface. Each top-level folder of
 | The tailnet only, HTTPS, tailnet identities | `npm run serve -- /path/to/projects --host 127.0.0.1 --access you@example.com`<br>plus `tailscale serve --bg --https=10000 http://127.0.0.1:5810` |
 
 With `--access`, identity comes from the `Tailscale-User-Login` headers that
-`tailscale serve` adds, trusted only on loopback, and each project can be
-private, shared with named people, or view-only. Without it, people type a
-name, used for carets and the history, and everyone who can reach the server
-can open and edit every project. Either way this is for trusted networks.
-Never expose it with `tailscale funnel`.
+`tailscale serve` adds, trusted only on loopback, and a project can be private,
+shared with named people, or view-only. Its permissions live in
+`.texwerk/access.json` (owner, public or private, and `edit`/`view` grants),
+outside the project's files, so they are never committed or mirrored. A
+project without that file is public and editable by everyone, so turning
+`--access` on changes nothing until somebody restricts a project. Without
+`--access`, people type a name, used for carets and the history, and everyone
+who can reach the server can open and edit every project. Either way there are
+no passwords: this is for trusted networks. Never expose it with
+`tailscale funnel`.
 
 The server answers only to names that can't be pointed at it from the
 internet: IP addresses, `localhost`, single-label names (`lab-server`),
@@ -225,7 +230,9 @@ re-sync, keeping local edits they had not sent yet.
   files on disk within ~120 ms; changes on disk (git pull, a shell on the
   server) are folded back in as minimal edits. `history.ts` keeps the edit
   history in `.texwerk/history/`, `git.ts` the labels, `compile.ts` runs
-  latexmk into `.texwerk/build/`. `.texwerk/` is excluded from git.
+  latexmk into `.texwerk/build/`, `identity.ts` and `access.ts` decide who
+  may open or edit what, and `origin.ts` turns away other websites.
+  `.texwerk/` is excluded from git.
 - `src/client/` — the browser app (CodeMirror 6 + y-codemirror.next, PDF.js).
 - `src/bridge/connect.ts` — the mirror bridge, bundled into
   `dist/texwerk-connect.mjs` and served by the server.
