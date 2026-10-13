@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { lstat, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { lstat, mkdir, readdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
 import { watchTree } from '../shared/watchTree.ts';
 import type { WebSocket } from 'ws';
@@ -37,6 +37,25 @@ import { listTrash, moveToTrash, PROJECT_TRASH, readEntry, restoreFromTrash, typ
  */
 
 const PERSIST_DEBOUNCE_MS = 120;
+
+/** The document's maps whose keys are paths in the project. */
+const PATH_MAPS = new Set(['text', 'bin', 'dirs']);
+
+/**
+ * Paths a Yjs update would add to the file maps that are not clean
+ * project-relative paths (`../x`, `.git/config`, `.texwerk/…`). A new map key
+ * always travels with its name; an item that replaces an existing key
+ * carries no name and inherits that key, which was checked when it arrived.
+ */
+export function unsafeKeys(update: Uint8Array): string[] {
+  const bad: string[] = [];
+  for (const struct of Y.decodeUpdate(update).structs) {
+    if (!(struct instanceof Y.Item)) continue;
+    const key = struct.parentSub;
+    if (typeof struct.parent === 'string' && PATH_MAPS.has(struct.parent) && key !== null && cleanPath(key) !== key) bad.push(key);
+  }
+  return bad;
+}
 const WATCH_DEBOUNCE_MS = 150;
 const AUTO_COMPILE_DELAY_MS = 1500;
 const UNLOAD_AFTER_MS = 10 * 60_000;
@@ -336,6 +355,17 @@ export class Project {
         if (decoding.readVarUint(dec) !== syncProtocol.messageYjsSyncStep1) return;
         syncProtocol.readSyncStep1(dec, enc, this.doc);
       } else {
+        // A file name that leads outside the project is refused before the
+        // change is applied or passed on to anyone.
+        const peek = decoding.clone(dec);
+        if (decoding.readVarUint(peek) !== syncProtocol.messageYjsSyncStep1) {
+          const bad = unsafeKeys(decoding.readVarUint8Array(peek));
+          if (bad.length) {
+            console.error(`[${this.name}] refused unsafe paths from ${conn.identity.name}: ${bad.slice(0, 5).join(', ')}`);
+            conn.ws.close(4400, 'unsafe file name');
+            return;
+          }
+        }
         syncProtocol.readSyncMessage(dec, enc, this.doc, conn);
       }
       if (encoding.length(enc) > 1) conn.ws.send(encoding.toUint8Array(enc));
@@ -416,11 +446,35 @@ export class Project {
     const hash = hashBytes(data);
     if (this.diskHash.get(path) === hash) return;
     this.diskHash.set(path, hash);
-    this.writeSync(path, data);
+    try { this.writeSync(path, data); } catch (err) { console.error(`[${this.name}] not written:`, (err as Error).message); }
+  }
+
+  /**
+   * Where `path` is on disk, refusing anything that would land outside the
+   * project: a path that is not clean, or one that goes through a symbolic
+   * link to a folder (a shell on the server can make one).
+   */
+  private safeAbs(path: string): string {
+    if (cleanPath(path) !== path) throw new Error(`unsafe path "${path}"`);
+    let at = this.dir;
+    for (const part of path.split('/').slice(0, -1)) {
+      at = join(at, part);
+      let link = false;
+      try { link = lstatSync(at).isSymbolicLink(); } catch { break; }
+      if (link) throw new Error(`"${path}" goes through a symbolic link`);
+    }
+    return join(this.dir, path);
+  }
+
+  /** The file behind `path`, for reading; never outside the project. */
+  async realFile(path: string): Promise<string> {
+    const real = await realpath(this.safeAbs(path));
+    if (!real.startsWith(`${await realpath(this.dir)}/`)) throw new Error(`"${path}" is outside the project`);
+    return real;
   }
 
   private writeSync(path: string, data: Buffer): void {
-    const abs = join(this.dir, path);
+    const abs = this.safeAbs(path);
     mkdirSync(dirname(abs), { recursive: true });
     const tmp = join(dirname(abs), `.texwerk-tmp-${process.pid}-${Math.random().toString(36).slice(2)}`);
     writeFileSync(tmp, data);
@@ -435,7 +489,7 @@ export class Project {
   }
 
   private async writeAtomic(path: string, data: Buffer): Promise<void> {
-    const abs = join(this.dir, path);
+    const abs = this.safeAbs(path);
     await mkdir(dirname(abs), { recursive: true });
     const tmp = join(dirname(abs), `.texwerk-tmp-${process.pid}-${Math.random().toString(36).slice(2)}`);
     await writeFile(tmp, data);

@@ -4,7 +4,7 @@ import { startServer } from './server.ts';
 
 /**
  * TeXWerk collaboration server:
- *   npm run serve -- <projectsRootDir> [--port 5810] [--host 0.0.0.0] [--access <adminLogin>]
+ *   npm run serve -- <projectsRootDir> [--port 5810] [--host 0.0.0.0] [--access <adminLogin>] [--allow-host <name>]
  *
  * Every top-level folder of <projectsRootDir> is a LaTeX project and a git
  * repository. Binds all interfaces by default so tailnet peers can reach it.
@@ -12,20 +12,26 @@ import { startServer } from './server.ts';
  * --access <adminLogin> takes identity from `tailscale serve`'s
  * Tailscale-User-Login headers (trusted on loopback only — pair with
  * --host 127.0.0.1 and `tailscale serve`). Without it, people type a name.
+ *
+ * --allow-host <name> (repeatable): a DNS name people reach the server by,
+ * besides IP addresses, localhost, single-label, *.ts.net and *.local names,
+ * which are always allowed (see origin.ts).
  */
 const args = process.argv.slice(2);
 let rootDir: string | null = null;
 let port = 5810;
 let host = '0.0.0.0';
 let access: string | null = null;
+const allowHosts: string[] = [];
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--port') port = Number(args[++i]);
   else if (args[i] === '--host') host = args[++i];
   else if (args[i] === '--access') access = args[++i];
+  else if (args[i] === '--allow-host') allowHosts.push(...args[++i].split(','));
   else if (!args[i].startsWith('-') && !rootDir) rootDir = args[i];
 }
 if (!rootDir || Number.isNaN(port)) {
-  process.stderr.write('usage: npm run serve -- <projectsRootDir> [--port 5810] [--host 0.0.0.0] [--access <adminLogin>]\n');
+  process.stderr.write('usage: npm run serve -- <projectsRootDir> [--port 5810] [--host 0.0.0.0] [--access <adminLogin>] [--allow-host <name>]\n');
   process.exit(2);
 }
 if (access && !['127.0.0.1', 'localhost', '::1'].includes(host)) {
@@ -42,6 +48,7 @@ const server = await startServer({
   port,
   host,
   access: access ? { admin: access } : null,
+  allowHosts,
 });
 process.stdout.write(`${JSON.stringify({ status: 'serving', rootDir: resolve(rootDir), access, urls: server.urls })}\n`);
 

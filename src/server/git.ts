@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { GitLabel } from '../shared/protocol.ts';
 
@@ -18,11 +18,41 @@ import type { GitLabel } from '../shared/protocol.ts';
  * non-interactively: no password prompts, no host-key questions.
  */
 
+/**
+ * Repositories come from anywhere (clone, pull), so git runs with settings
+ * that no repository can override: symbolic links are checked out as plain
+ * files (a link to `../other-project` would let writes into this project
+ * land in another), and no hook or fsmonitor command ever runs.
+ */
+const SAFE_CONFIG: Array<[string, string]> = [
+  ['core.symlinks', 'false'],
+  ['core.hooksPath', '/dev/null'],
+  ['core.fsmonitor', 'false'],
+  ['protocol.ext.allow', 'never'],
+];
+
 const GIT_ENV = {
   ...process.env,
   GIT_TERMINAL_PROMPT: '0',
   GIT_SSH_COMMAND: 'ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new',
+  GIT_CONFIG_COUNT: String(SAFE_CONFIG.length),
+  ...Object.fromEntries(SAFE_CONFIG.flatMap(([k, v], i) => [[`GIT_CONFIG_KEY_${i}`, k], [`GIT_CONFIG_VALUE_${i}`, v]])),
 };
+
+/**
+ * `.texwerk/` holds the server's own state (who may open the project, its
+ * deploy key, its settings). A label commits only the comment threads and
+ * the chat from it, so a tree that carries anything else there did not come
+ * from TeXWerk and must not be checked out over that state.
+ */
+const SHARED_STATE = new Set(['.texwerk/comments.json', '.texwerk/chat.jsonl']);
+
+async function foreignState(dir: string, treeish: string): Promise<string | null> {
+  const listed = await git(dir, ['ls-tree', '-r', '--name-only', '-z', treeish, '--', '.texwerk']);
+  if (!listed.ok) return null;
+  const bad = listed.output.split('\0').filter((f) => f && !SHARED_STATE.has(f));
+  return bad.length ? `The remote carries files in .texwerk/ (${bad.slice(0, 3).join(', ')}), where TeXWerk keeps its own state. Remove them from the repository first.` : null;
+}
 
 export interface GitResult {
   ok: boolean;
@@ -205,8 +235,12 @@ export async function pull(dir: string, name: string, email: string): Promise<Gi
     if (!(await git(dir, ['rev-parse', '--verify', '-q', `origin/${branch}`])).ok) {
       return { ok: true, output: 'The remote is empty: nothing to pull. Label a version and push to fill it.' };
     }
+    const foreign = await foreignState(dir, `origin/${branch}`);
+    if (foreign) return { ok: false, output: foreign };
     return git(dir, ['checkout', '-f', '-B', branch, '--track', `origin/${branch}`]);
   }
+  const foreign = await foreignState(dir, `origin/${branch}`);
+  if (foreign) return { ok: false, output: foreign };
   // Unlabelled work in progress is committed first so a pull never discards it.
   if ((await git(dir, ['status', '--porcelain'])).output) {
     const saved = await commitAll(dir, 'Changes before pull', name, email, -1);
@@ -231,5 +265,15 @@ export async function checkoutTree(dir: string, commit: string): Promise<GitResu
 }
 
 export async function clone(parent: string, url: string, name: string): Promise<GitResult> {
-  return git(parent, ['clone', '--', url, name], 300_000);
+  const r = await git(parent, ['clone', '--no-checkout', '--', url, name], 300_000);
+  if (!r.ok) return r;
+  const dir = join(parent, name);
+  const foreign = await foreignState(dir, 'HEAD');
+  if (foreign) {
+    await rm(dir, { recursive: true, force: true });
+    return { ok: false, output: foreign };
+  }
+  if (!(await git(dir, ['rev-parse', '--verify', '-q', 'HEAD'])).ok) return r; // an empty repository
+  const checkout = await git(dir, ['checkout', '-q']);
+  return checkout.ok ? r : checkout;
 }

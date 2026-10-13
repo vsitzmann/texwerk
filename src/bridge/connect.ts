@@ -4,7 +4,7 @@ import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'no
 import { dirname, join, resolve } from 'node:path';
 import * as Y from 'yjs';
 import { Awareness } from 'y-protocols/awareness';
-import { colorFor, isBuildArtifact, isEditorTempFile, isTextFile } from '../shared/files.ts';
+import { cleanPath, colorFor, isBuildArtifact, isEditorTempFile, isTextFile } from '../shared/files.ts';
 import { isMassDeletion } from '../shared/deletionGuard.ts';
 import { Provider } from '../shared/provider.ts';
 import { BRIDGE_HEADER, type BinInfo, type CompileSummary, type ServerEvent } from '../shared/protocol.ts';
@@ -211,11 +211,18 @@ let ready = false;
 let online = false;
 let me = typedName ?? 'you';
 
+/**
+ * A project path in the mirror folder. The server refuses file names that
+ * lead elsewhere, and so does the mirror, whatever it is sent: it never
+ * writes or deletes outside its folder, or in its own .texwerk/.
+ */
 function abs(rel: string): string {
+  if (cleanPath(rel) !== rel) throw new Error(`refusing the unsafe path "${rel}"`);
   return join(root, ...rel.split('/'));
 }
 
 function ignored(rel: string): boolean {
+  if (cleanPath(rel) !== rel) return true; // a name the project cannot hold, like one with a backslash
   const parts = rel.split('/');
   if (parts[0] === LOCAL_DIR || parts[0] === '.git' || parts[0] === 'node_modules') return true;
   if (parts.some((p) => p === '.DS_Store')) return true;

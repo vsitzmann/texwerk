@@ -6,7 +6,7 @@ import { extname, join, resolve } from 'node:path';
 import { WebSocketServer } from 'ws';
 import { cleanPath, cleanProjectId, cleanProjectName } from '../shared/files.ts';
 import { BRIDGE_HEADER, type Identity, type ProjectSettings } from '../shared/protocol.ts';
-import { synctex } from './compile.ts';
+import { setupCompileSandbox, synctex } from './compile.ts';
 import * as gitOps from './git.ts';
 import { resolveIdentity, type AccessConfig } from './identity.ts';
 import {
@@ -19,6 +19,7 @@ import { readZip, writeZip } from './zip.ts';
 import { allThreads, commentsMarkdown, sortThreads } from '../shared/comments.ts';
 import { messagesSince, parseRef, type ChatRef } from '../shared/chat.ts';
 import { annotatePdf, pdfPosition } from './pdfComments.ts';
+import { refusal } from './origin.ts';
 
 /**
  * The TeXWerk server: one HTTP port serving the browser client, a JSON API,
@@ -36,6 +37,8 @@ export interface ServerOptions {
   port: number;
   host: string;
   access: AccessConfig | null;
+  /** Host names besides the ones `hostAllowed` accepts on its own (see origin.ts). */
+  allowHosts?: string[];
 }
 
 const MIME: Record<string, string> = {
@@ -81,13 +84,31 @@ function contentDisposition(kind: 'inline' | 'attachment', name: string): string
   return `${kind}; filename="${name.replace(/[^\x20-\x7e]|"/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 }
 
-async function sendFile(request: IncomingMessage, response: ServerResponse, abs: string, opts: { download?: string; noStore?: boolean; immutable?: boolean } = {}): Promise<void> {
+/** Types a browser runs scripts in when it navigates to them. */
+const ACTIVE_TYPES = /^(text\/html|image\/svg\+xml|application\/xml|text\/xml|application\/xhtml\+xml)\b/;
+
+/**
+ * `untrusted`: a file someone put in a project, served from this origin. It
+ * must never run as one of our pages: no sniffing, HTML and XML go out as
+ * text, and anything else a browser renders (an SVG opened from a link) is
+ * sandboxed. PDFs are left alone, since browsers' PDF viewers refuse to run
+ * sandboxed and a PDF cannot reach the page's origin anyway.
+ */
+async function sendFile(request: IncomingMessage, response: ServerResponse, abs: string, opts: { download?: string; noStore?: boolean; immutable?: boolean; untrusted?: boolean } = {}): Promise<void> {
   let info;
   try { info = await stat(abs); } catch { throw new HttpError(404, 'not found'); }
   if (!info.isFile()) throw new HttpError(404, 'not found');
   const etag = `"${info.size.toString(36)}-${Math.floor(info.mtimeMs).toString(36)}"`;
+  let type = MIME[extname(abs).toLowerCase()] ?? 'application/octet-stream';
+  const sandbox: Record<string, string> = {};
+  if (opts.untrusted) {
+    if (ACTIVE_TYPES.test(type) && type !== 'image/svg+xml') type = 'text/plain; charset=utf-8';
+    sandbox['x-content-type-options'] = 'nosniff';
+    if (type !== 'application/pdf') sandbox['content-security-policy'] = "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'";
+  }
   const headers: Record<string, string> = {
-    'content-type': MIME[extname(abs).toLowerCase()] ?? 'application/octet-stream',
+    ...sandbox,
+    'content-type': type,
     'cache-control': opts.noStore ? 'no-store' : opts.immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
     etag,
     'accept-ranges': 'bytes',
@@ -138,6 +159,9 @@ Start writing here.
 export async function startServer(options: ServerOptions) {
   const rootDir = resolve(options.rootDir);
   await mkdir(rootDir, { recursive: true });
+  if (!setupCompileSandbox(rootDir)) {
+    process.stderr.write('warning: compiles are not sandboxed (bubblewrap is missing or cannot create namespaces here), so a document can read any file this server can read, other projects included.\n');
+  }
   const projects = new Map<string, Promise<Project>>();
   /** Projects whose folder is being renamed: nobody may (re)open the old id meanwhile. */
   const relocating = new Set<string>();
@@ -348,6 +372,8 @@ export async function startServer(options: ServerOptions) {
     const url = new URL(request.url ?? '/', 'http://localhost');
     const path = decodeURIComponent(url.pathname);
     const method = request.method ?? 'GET';
+    const refused = refusal(request, options.allowHosts ?? []);
+    if (refused) throw new HttpError(403, refused);
     const identity = identityOf(request, url);
     if (users) void users.note(identity);
     const bridge = request.headers[BRIDGE_HEADER] === '1';
@@ -362,7 +388,7 @@ export async function startServer(options: ServerOptions) {
       if (!options.clientDir) throw new HttpError(404, 'client not built — run npm run build');
       const rel = path === '/' ? 'index.html' : path.slice(1);
       const abs = resolve(options.clientDir, rel);
-      if (!abs.startsWith(options.clientDir) || !existsSync(abs)) return sendFile(request, response, join(options.clientDir, 'index.html'));
+      if (!abs.startsWith(`${options.clientDir}/`) || !existsSync(abs)) return sendFile(request, response, join(options.clientDir, 'index.html'));
       // Vite names everything under app/ by content hash, so it never changes
       // (Harper's 16 MB dictionary would otherwise be revalidated on every load).
       return sendFile(request, response, abs, { immutable: rel.startsWith('app/') });
@@ -380,7 +406,7 @@ export async function startServer(options: ServerOptions) {
       const ytext = project.texts.get(rel);
       const download = url.searchParams.has('download') ? rel.split('/').pop() : undefined;
       if (ytext) {
-        const headers: Record<string, string> = { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' };
+        const headers: Record<string, string> = { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' };
         if (download) headers['content-disposition'] = contentDisposition('attachment', download);
         response.writeHead(200, headers);
         response.end(ytext.toString());
@@ -391,7 +417,7 @@ export async function startServer(options: ServerOptions) {
       let real: string;
       try { real = await realpath(join(project.dir, rel)); } catch { throw new HttpError(404, 'not found'); }
       if (!real.startsWith(`${await realpath(project.dir)}/`)) throw new HttpError(403, 'outside the project');
-      return sendFile(request, response, real, { download });
+      return sendFile(request, response, real, { download, untrusted: true });
     }
     // /pdf/<project id>/<name>.pdf: the latest compiled PDF.
     const pdf = /^\/pdf\/([^/]+)\/[^/]*$/.exec(url.pathname);
@@ -752,6 +778,7 @@ export async function startServer(options: ServerOptions) {
       if (body.mainFile !== undefined) {
         const main = bodyPath(body.mainFile);
         if (!project.texts.has(main)) throw new HttpError(400, 'main file must be a text file in the project');
+        if (main.startsWith('-')) throw new HttpError(400, 'the main file\'s name must not start with "-"');
         project.settings.mainFile = main;
       }
       if (body.engine && ['pdflatex', 'xelatex', 'lualatex'].includes(body.engine)) project.settings.engine = body.engine;
@@ -987,7 +1014,7 @@ export async function startServer(options: ServerOptions) {
         name: `${base}/${rel}`,
         load: async () => {
           const t = project.texts.get(rel);
-          return t ? Buffer.from(t.toString(), 'utf8') : readFile(join(project.dir, rel));
+          return t ? Buffer.from(t.toString(), 'utf8') : readFile(await project.realFile(rel));
         },
       }));
       // The sources never contain comments; they come along only on request.
@@ -1019,6 +1046,11 @@ export async function startServer(options: ServerOptions) {
   server.on('upgrade', (request, socket, head) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
     if (url.pathname !== '/ws') { socket.destroy(); return; }
+    if (refusal(request, options.allowHosts ?? [])) {
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     let identity: Identity;
     try { identity = identityOf(request, url); } catch {
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');

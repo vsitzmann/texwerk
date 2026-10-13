@@ -1,5 +1,5 @@
-import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, delimiter, join, resolve } from 'node:path';
 import type { CompileIssue, ProjectSettings } from '../shared/protocol.ts';
@@ -9,7 +9,12 @@ import type { CompileIssue, ProjectSettings } from '../shared/protocol.ts';
  *
  * Runs non-stop and forced (-f) like Overleaf, so a document with errors
  * still produces as much PDF as TeX manages. Shell escape stays at TeX's
- * restricted default. The combined latexmk output and the TeX log are kept
+ * restricted default.
+ *
+ * A project is written by everyone who can edit it, so nothing in it may run
+ * code on the server, and no compile may read another project: latexmk
+ * ignores every latexmkrc (they are Perl), and the compile runs in a sandbox
+ * (`setupCompileSandbox`). The combined latexmk output and the TeX log are kept
  * for the Log panel; the log is also parsed into a list of errors and
  * warnings with file and line.
  */
@@ -18,6 +23,50 @@ export const BUILD_DIR = join('.texwerk', 'build');
 /** Packages that override buggy TeX Live ones (see tex/README.md). */
 const TEX_OVERRIDES = resolve(import.meta.dirname, '..', '..', 'tex');
 const TIMEOUT_MS = 240_000;
+
+/**
+ * TeX's `\input` opens any file it can name (`openin_any` does not apply to
+ * it), so a document could print another project's files or this project's
+ * deploy key into its PDF. Compiles therefore run under bubblewrap when it
+ * works here: the system read-only, the projects root replaced by an empty
+ * folder holding only this project, the project's `.texwerk/` hidden except
+ * the build folder, no network. Where bubblewrap is missing or the service's
+ * own sandbox forbids user namespaces, compiles run unconfined and the server
+ * says so when it starts.
+ */
+let sandbox: { root: string; texmfVar: string | null } | null = null;
+
+export function setupCompileSandbox(rootDir: string): boolean {
+  let texmfVar: string | null = null;
+  try { texmfVar = execFileSync('kpsewhich', ['-var-value', 'TEXMFVAR'], { encoding: 'utf8' }).trim() || null; } catch { /* no TeX */ }
+  if (texmfVar) { try { mkdirSync(texmfVar, { recursive: true }); } catch { texmfVar = null; } }
+  sandbox = { root: realpathSync(rootDir), texmfVar };
+  try {
+    const [command, args] = sandboxed('true', [], rootDir, null);
+    execFileSync(command, args, { stdio: 'ignore', timeout: 10_000 });
+    return true;
+  } catch {
+    sandbox = null;
+    return false;
+  }
+}
+
+function sandboxed(command: string, args: string[], dir: string, out: string | null): [string, string[]] {
+  if (!sandbox) return [command, args];
+  const projectDir = realpathSync(dir);
+  const outDir = out && realpathSync(out);
+  const wrap = [
+    '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp',
+    '--tmpfs', sandbox.root,
+    ...(projectDir !== sandbox.root ? ['--bind', projectDir, projectDir, '--tmpfs', join(projectDir, '.texwerk')] : []),
+    ...(outDir ? ['--bind', outDir, outDir] : []),
+    '--ro-bind', TEX_OVERRIDES, TEX_OVERRIDES,
+    // LuaTeX keeps its font cache here.
+    ...(sandbox.texmfVar ? ['--bind', sandbox.texmfVar, sandbox.texmfVar] : []),
+    '--unshare-all', '--die-with-parent', '--new-session', '--chdir', projectDir,
+  ];
+  return ['bwrap', [...wrap, '--', command, ...args]];
+}
 
 export interface CompileRun {
   ok: boolean;
@@ -48,14 +97,18 @@ export async function runLatexmk(projectDir: string, settings: ProjectSettings, 
   if (!main || !existsSync(join(projectDir, main))) {
     return { ok: false, upToDate: false, pdf: null, output: `Main file "${main}" not found. Choose a main file in the compile menu.`, log: '', issues: [] };
   }
+  if (main.startsWith('-')) {
+    return { ok: false, upToDate: false, pdf: null, output: `The main file "${main}" starts with "-". Rename it.`, log: '', issues: [] };
+  }
   const args = [
-    ENGINE_FLAG[settings.engine] ?? '-pdf',
+    '-norc', ENGINE_FLAG[settings.engine] ?? '-pdf',
     '-f', ...(opts.force ? ['-g'] : []), '-interaction=nonstopmode', '-file-line-error', '-synctex=1',
     `-outdir=${outDir}`, main,
   ];
   const output = await new Promise<{ code: number | null; text: string }>((resolve) => {
     let text = '';
-    const child = spawn('latexmk', args, { cwd: projectDir, env: {
+    const [command, commandArgs] = sandboxed('latexmk', args, projectDir, outDir);
+    const child = spawn(command, commandArgs, { cwd: projectDir, env: {
       ...process.env, max_print_line: '1000',
       // The project first, then our overrides, then TeX Live (the empty entry).
       TEXINPUTS: `.${delimiter}${TEX_OVERRIDES}${delimiter}`,
