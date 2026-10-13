@@ -288,10 +288,18 @@ TeXWerk trusts everyone who can reach it. Please keep that in mind:
   other projects.
 - Run the server as its own user, with no access to secrets. On Linux, a
   systemd unit with `ProtectHome=yes` and `ProtectSystem=strict` works well.
-  For the compile sandbox, the unit has to allow user namespaces
-  (`RestrictNamespaces=user mnt pid net ipc uts cgroup`) and the `@mount` and
-  `pivot_root` system calls, and must not deny `@privileged`; with
-  `CapabilityBoundingSet=` empty the service holds no capabilities anyway.
+  For the compile sandbox, the unit has to:
+  - allow user namespaces (`RestrictNamespaces=user mnt pid net ipc uts cgroup`);
+  - allow the `@mount` and `pivot_root` system calls, and not deny
+    `@privileged` (with `CapabilityBoundingSet=` empty the service holds no
+    capabilities anyway);
+  - leave out `ProcSubset=pid`, which hides `/proc/sys` from bubblewrap;
+  - leave out `RestrictSUIDSGID=`, which systemd enforces by failing
+    `openat2()`, a call bubblewrap needs. `NoNewPrivileges=yes` makes setuid
+    bits harmless for the service anyway.
+
+  If the server warns at start that compiles are not sandboxed, the warning
+  quotes bubblewrap's error.
 - File names in the collaborative document are checked before a change is
   applied; a change that names a file outside the project closes the
   connection. Requests from other websites and from unknown host names are
