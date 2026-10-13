@@ -1,7 +1,11 @@
 # TeXWerk
 
-**Collaborative LaTeX editing for trusted networks and tailnets — DeckWerk's
-headless collaboration server, for papers.**
+**TeXWerk is a collaborative LaTeX editor that you host yourself, by Vincent Sitzmann.**
+
+*TeX* as in LaTeX, and *Werk* as in the German word that means "a work (of art,
+literature, etc)", a factory, or a structure. It is the sibling of
+[DeckWerk](https://github.com/vsitzmann/deckwerk), my slide editor, and works
+the same way.
 
 Open the server's address, pick a project, and write: file tree on the left,
 editor in the middle, the compiled PDF on the right. Everyone who has the
@@ -9,7 +13,43 @@ project open sees everyone else's caret and edits live. Bring your own agent
 (Claude Code, Codex, …) or your own editor with one command that mirrors the
 project into a local folder and keeps it in sync both ways.
 
-No accounts. On a tailnet with `--access`, your tailnet login is your identity.
+![Editing a paper in TeXWerk](docs/images/editor.png)
+
+## Why TeXWerk?
+
+My lab writes all its papers in LaTeX, together, and more and more with AI
+agents. Hosted editors are good at the first part. They are not built for the
+second: an agent wants a plain folder of files, a compiler and a shell, not a
+web page. And the papers live on someone else's server.
+
+TeXWerk starts from a different set of assumptions:
+
+- A paper is a folder of ordinary files and a git repository. You can always
+  `cd` into it, `git log` it, or take it elsewhere.
+- An AI agent should be able to edit the same paper as a person, at the same
+  time, without anyone losing a keystroke.
+- Starting to write together should not require creating accounts or
+  uploading a paper to a third-party service.
+- It runs on one machine you already have: a lab server, a workstation, a
+  laptop.
+
+### Native agent integration
+
+TeXWerk does not run agents and does not own an agent account. **Agent…**
+gives every collaborator one command that mirrors the live project into a
+folder on their own machine. Their agent edits plain files there, compiles
+with `node .texwerk/tw compile`, reads and answers comments and chat, and its
+edits reach everyone within tens of milliseconds, merged character by
+character with what people are typing. Only Node is needed.
+
+### Effortless collaboration on trusted networks
+
+TeXWerk is for trusted networks: a lab, a company, or a
+[Tailscale](https://tailscale.com) tailnet. Anyone who can reach the server can
+join. On a tailnet with `--access`, your tailnet login is your identity, and
+projects can be private, shared with named people, or view-only. There are no
+passwords and no accounts. It is not a public document-sharing service and
+must not be exposed to the open internet.
 
 ## Features
 
@@ -127,10 +167,23 @@ No accounts. On a tailnet with `--access`, your tailnet login is your identity.
 
 ## Running it
 
-Needs Node 22.18+ (TypeScript runs natively), git, and TeX Live with `latexmk`
-(and `synctex` for SyncTeX).
+You need [Node.js](https://nodejs.org/) 22.18 or newer (TypeScript runs
+natively, there is no compile step for the server), git, a TeX distribution
+with `latexmk` and `synctex`, and on Linux
+[bubblewrap](https://github.com/containers/bubblewrap), which keeps each
+compile inside its own project (see [Security](#security)):
+
+| System | TeX and bubblewrap |
+| --- | --- |
+| Debian, Ubuntu | `sudo apt install texlive-full latexmk bubblewrap` (or a smaller selection of `texlive-*` packages) |
+| Arch | `sudo pacman -S texlive texlive-binextra biber bubblewrap` |
+| macOS | [MacTeX](https://tug.org/mactex/) (no bubblewrap: compiles are not sandboxed) |
+
+Then:
 
 ```bash
+git clone https://github.com/vsitzmann/texwerk.git
+cd texwerk
 npm ci
 npm run build                     # browser client + texwerk-connect.mjs
 npm run serve -- /path/to/projects
@@ -146,10 +199,16 @@ The server listens on port 5810, every interface. Each top-level folder of
 | The tailnet only, HTTPS, tailnet identities | `npm run serve -- /path/to/projects --host 127.0.0.1 --access you@example.com`<br>plus `tailscale serve --bg --https=10000 http://127.0.0.1:5810` |
 
 With `--access`, identity comes from the `Tailscale-User-Login` headers that
-`tailscale serve` adds, trusted only on loopback. Without it, people type a
-name, used for carets and the history. Either way, everyone who can reach the
-server can open and edit every project: this is for trusted networks. Never
-expose it with `tailscale funnel`.
+`tailscale serve` adds, trusted only on loopback, and each project can be
+private, shared with named people, or view-only. Without it, people type a
+name, used for carets and the history, and everyone who can reach the server
+can open and edit every project. Either way this is for trusted networks.
+Never expose it with `tailscale funnel`.
+
+The server answers only to names that can't be pointed at it from the
+internet: IP addresses, `localhost`, single-label names (`lab-server`),
+`*.ts.net` and `*.local`. If people reach it by another DNS name, add it with
+`--allow-host texwerk.example.org`.
 
 ### Restarting
 
@@ -199,12 +258,75 @@ its files, start a second mirror on it, delete files while it is stopped — and
 check that the server keeps exactly what it should. A fuzz failure prints its
 seed; rerun it with `FUZZ_SEEDS=<seed> npm run test:fuzz`.
 
+## Security
+
+TeXWerk trusts everyone who can reach it. Please keep that in mind:
+
+- Without `--access`, everyone who can reach the server can open, edit and
+  delete every project. People type a name; nothing checks it.
+- With `--access`, identity comes from `tailscale serve`'s
+  `Tailscale-User-Login` header, which the server trusts only from loopback.
+  Bind `--host 127.0.0.1` and publish only through `tailscale serve`. A request
+  from a shell on the machine itself counts as the administrator.
+- Nothing in a project runs as code on the server. latexmk ignores
+  `latexmkrc` files, TeX keeps its restricted shell escape, and git runs no
+  hooks and checks out symbolic links as plain files. A pull or clone that
+  would write into `.texwerk/`, where the server keeps a project's access list
+  and deploy key, is refused.
+- TeX's `\input` can read any file the server's user can read. So with
+  bubblewrap, each compile runs in a sandbox that sees the system read-only,
+  its own project and nothing of the other projects or the project's
+  `.texwerk/`, with no network. Without bubblewrap, or where user namespaces
+  are not allowed, the server warns when it starts. Then a document can read
+  other projects.
+- Run the server as its own user, with no access to secrets. On Linux, a
+  systemd unit with `ProtectHome=yes` and `ProtectSystem=strict` works well.
+  For the compile sandbox, the unit has to allow user namespaces
+  (`RestrictNamespaces=user mnt pid net ipc uts cgroup`) and the `@mount` and
+  `pivot_root` system calls, and must not deny `@privileged`; with
+  `CapabilityBoundingSet=` empty the service holds no capabilities anyway.
+- File names in the collaborative document are checked before a change is
+  applied; a change that names a file outside the project closes the
+  connection. Requests from other websites and from unknown host names are
+  refused, and files from projects are served so that they cannot run as
+  TeXWerk pages.
+- Never expose it with `tailscale funnel`, a port forward or a reverse proxy to
+  the internet.
+
+If you find a security problem, please report it privately through GitHub's
+**Report a vulnerability** (Security tab) rather than in a public issue.
+
 ## Limits
 
-- TeX runs with its default file access: a document can `\input` any file the
-  `texwerk` user can read. The systemd sandbox limits that to the system
-  itself; don't run the server with access to secrets.
 - Editors that keep a stale buffer and save it will revert others' changes in
   that file, as with any file-based sync. Turn on auto-reload of changed files.
 - Two people typing at exactly the same spot at the same moment interleave
   their letters, as in every real-time editor.
+
+## Contributing
+
+Pull requests are welcome. `main` is what runs on my lab's server: it is
+deployed every night, so it has to work, and changes reach it only through
+pull requests that pass CI. Before you open a PR:
+
+- `npm run typecheck`, `npm run build` and `npm test` pass (CI runs them on
+  Node 22 and 26).
+- A change to the mirror, the sync or the server's file handling comes with a
+  test (`test/unit.test.ts`, `test/mirror-safety.test.ts`, or a new move for
+  the fuzzer in `test/mirror-fuzz.test.ts`).
+- A change to the editor is tried in a real browser; the `test/e2e-*.ts`
+  scripts show how to drive one with Playwright.
+- New UI matches what is there: reuse the existing controls and styles in
+  `src/client/style.css`.
+
+## Project status
+
+TeXWerk is in *alpha, under active development*. My lab writes real papers
+with it every day, but the protocol and the files in `.texwerk/` may still
+change.
+
+## License
+
+[MIT](LICENSE). The bundled Monaspace font is under the SIL Open Font License
+(`src/client/fonts/LICENSE-Monaspace.txt`), and `tex/lineno.sty` under the
+LaTeX Project Public License.
