@@ -36,18 +36,20 @@ const TIMEOUT_MS = 240_000;
  */
 let sandbox: { root: string; texmfVar: string | null } | null = null;
 
-export function setupCompileSandbox(rootDir: string): boolean {
+/** Sets up the sandbox; returns why compiles will run without one, or null. */
+export function setupCompileSandbox(rootDir: string): string | null {
   let texmfVar: string | null = null;
   try { texmfVar = execFileSync('kpsewhich', ['-var-value', 'TEXMFVAR'], { encoding: 'utf8' }).trim() || null; } catch { /* no TeX */ }
   if (texmfVar) { try { mkdirSync(texmfVar, { recursive: true }); } catch { texmfVar = null; } }
   sandbox = { root: realpathSync(rootDir), texmfVar };
   try {
     const [command, args] = sandboxed('true', [], rootDir, null);
-    execFileSync(command, args, { stdio: 'ignore', timeout: 10_000 });
-    return true;
-  } catch {
+    execFileSync(command, args, { stdio: ['ignore', 'ignore', 'pipe'], timeout: 10_000 });
+    return null;
+  } catch (err) {
     sandbox = null;
-    return false;
+    const e = err as { stderr?: Buffer; message: string };
+    return (e.stderr?.toString().trim() || e.message).split('\n')[0];
   }
 }
 
@@ -56,7 +58,10 @@ function sandboxed(command: string, args: string[], dir: string, out: string | n
   const projectDir = realpathSync(dir);
   const outDir = out && realpathSync(out);
   const wrap = [
-    '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp',
+    // An empty /proc: a fresh one cannot be mounted under systemd's
+    // ProtectKernelTunables=, and the real one would lead back out through
+    // /proc/<server pid>/root. TeX and latexmk do not need it.
+    '--ro-bind', '/', '/', '--dev', '/dev', '--tmpfs', '/proc', '--tmpfs', '/tmp',
     '--tmpfs', sandbox.root,
     ...(projectDir !== sandbox.root ? ['--bind', projectDir, projectDir, '--tmpfs', join(projectDir, '.texwerk')] : []),
     ...(outDir ? ['--bind', outDir, outDir] : []),

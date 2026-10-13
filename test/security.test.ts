@@ -169,16 +169,19 @@ test('compiles run no code from the project and read no other project', { skip: 
     const marker = join(root, 'ran');
     for (const rc of ['latexmkrc', '.latexmkrc']) await writeFile(join(paper, rc), `system("touch ${marker}");\n`);
     await writeFile(join(paper, 'main.tex'), '\\documentclass{article}\\begin{document}Hello\\end{document}\n');
-    await writeFile(join(paper, 'peek.tex'), '\\documentclass{article}\\begin{document}\\input{../Other/secret}\\end{document}\n');
     const settings = { mainFile: 'main.tex', engine: 'pdflatex' as const, autoCompile: false };
-    const sandboxed = setupCompileSandbox(root);
+    const unsandboxed = setupCompileSandbox(root);
     const run = await runLatexmk(paper, settings);
     assert.ok(run.ok && run.pdf, run.output);
     assert.ok(!existsSync(marker), 'a latexmkrc in the project never runs');
-    if (!sandboxed) { t.skip('bubblewrap cannot create a sandbox here'); return; }
-    const peek = await runLatexmk(paper, { ...settings, mainFile: 'peek.tex' });
-    assert.ok(!peek.output.includes('SECRETTEXT') && !(peek.pdf && existsSync(peek.pdf)), 'another project is out of reach');
-    assert.match(peek.issues.map((i) => i.message).join('\n'), /secret\.tex' not found/);
+    if (unsandboxed) { t.skip(`no sandbox here: ${unsandboxed}`); return; }
+    // Directly, and through the server's own root in /proc.
+    for (const path of ['../Other/secret', `/proc/${process.pid}/root${root}/Other/secret`]) {
+      await writeFile(join(paper, 'peek.tex'), `\\documentclass{article}\\begin{document}\\input{${path}}\\end{document}\n`);
+      const peek = await runLatexmk(paper, { ...settings, mainFile: 'peek.tex' });
+      assert.ok(!peek.output.includes('SECRETTEXT') && !(peek.pdf && existsSync(peek.pdf)), `${path} is out of reach`);
+      assert.match(peek.issues.map((i) => i.message).join('\n'), /secret\.tex' not found/, path);
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
