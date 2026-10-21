@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { chmodSync, existsSync } from 'node:fs';
 import { appendFile, mkdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { GitLabel } from '../shared/protocol.ts';
@@ -73,6 +73,10 @@ export function deployKeyPath(dir: string): string {
 function envFor(cwd: string): NodeJS.ProcessEnv {
   const key = deployKeyPath(cwd);
   if (!existsSync(key)) return GIT_ENV;
+  // Projects inherit a default ACL that lets the group read new files, and
+  // ssh refuses a private key anyone but its owner can read. chmod 600 also
+  // drops the ACL mask, so this heals keys made before the fix too.
+  try { chmodSync(key, 0o600); } catch { /* not ours to change; ssh will say so */ }
   return {
     ...GIT_ENV,
     GIT_SSH_COMMAND: `ssh -i '${key.replace(/'/g, `'\\''`)}' -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new`,
