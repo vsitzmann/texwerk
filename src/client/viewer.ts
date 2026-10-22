@@ -25,29 +25,50 @@ interface TextRun {
   top: number;
   size: number;
   width: number;
+  /** The CSS font family pdf.js maps the run's font to (serif, sans-serif…). */
+  family: string;
 }
 
-/** A comment's pin on the PDF, at its SyncTeX position. */
-export interface PdfPin {
-  id: string;
-  page: number;
-  /** The commented words' box on the page, in PDF points from the top-left. */
+/** A box on a page, in PDF points from the page's top-left. */
+export interface Box {
   x: number;
   y: number;
   width: number;
   height: number;
+}
+
+/** A comment's pin on the PDF, at its SyncTeX position. */
+export interface PdfPin extends Box {
+  id: string;
+  page: number;
+  /** One box per printed line of the commented words; the pin's own box is the first. */
+  rects: Box[];
   color: string;
   title: string;
 }
 
-/** Where a quote is printed: its first line's box, in PDF points from the page's top-left. */
-export interface TextSpot {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
+/** Where a quote is printed: its first line's box, and every line's in `rects`. */
+export interface TextSpot extends Box {
+  rects: Box[];
   /** False when only the paragraph was found, not the words themselves. */
   exact: boolean;
+}
+
+const measure = document.createElement('canvas').getContext('2d')!;
+
+/**
+ * Where character `i` of `run` starts. pdf.js gives only the whole run's
+ * width, often a full line, so split it in proportion to a similar browser
+ * font's widths: printed fonts are proportional, and an even split drifts by
+ * a word or more along a line.
+ */
+function xAt(run: TextRun, i: number): number {
+  if (i <= 0) return run.x;
+  if (i >= run.str.length) return run.x + run.width;
+  measure.font = `100px ${run.family}`;
+  const whole = measure.measureText(run.str).width;
+  const part = whole ? measure.measureText(run.str.slice(0, i)).width / whole : i / run.str.length;
+  return run.x + part * run.width;
 }
 
 export interface ViewerOptions {
@@ -87,7 +108,8 @@ class PdfView {
       cached = p ? p.page.getTextContent().then((tc) => tc.items.flatMap((item) => {
         if (!('str' in item) || !item.str) return [];
         const size = Math.hypot(item.transform[2], item.transform[3]) || 10;
-        return [{ str: item.str, x: item.transform[4], top: p.height - item.transform[5] - size * 0.8, size, width: item.width }];
+        const family = tc.styles[item.fontName]?.fontFamily ?? 'serif';
+        return [{ str: item.str, x: item.transform[4], top: p.height - item.transform[5] - size * 0.8, size, width: item.width, family }];
       })) : Promise.resolve([]);
       this.textCache.set(pageNumber, cached);
     }
@@ -104,6 +126,8 @@ class PdfView {
     const words = quote
       .replace(/(^|[^\\])%.*$/gm, '$1')
       .replace(/\$[^$]*\$/g, ' ')
+      // Keys and labels are never printed as written.
+      .replace(/\\(?:\w*cite\w*|ref|eqref|autoref|cref|Cref|label)\*?(?:\[[^\]]*\])*\{[^}]*\}/g, ' ')
       .replace(/\\[a-zA-Z@]+\*?/g, ' ')
       .replace(/[{}\[\]~\\^_&#]/g, ' ')
       .split(/\s+/)
@@ -114,36 +138,58 @@ class PdfView {
     // One string for the page, remembering which run each character came from.
     let text = '';
     const owner: number[] = [];
+    const starts: number[] = [];
     items.forEach((item, i) => {
       const piece = `${item.str} `;
+      starts.push(text.length);
       text += piece;
       for (let k = 0; k < piece.length; k++) owner.push(i);
     });
+    // One box per line for text[from, to): the runs it touches, joined on each line.
+    const boxes = (from: number, to: number): Box[] => {
+      const out: Box[] = [];
+      for (let k = from; k < to;) {
+        const i = owner[k];
+        const run = items[i];
+        const x0 = xAt(run, k - starts[i]);
+        const x1 = xAt(run, Math.min(to, starts[i] + run.str.length) - starts[i]);
+        const last = out.at(-1);
+        if (last && Math.abs(last.y - run.top) < run.size / 2) last.width = Math.max(last.x + last.width, x1) - last.x;
+        else out.push({ x: x0, y: run.top, width: x1 - x0, height: run.size });
+        k = starts[i] + run.str.length + 1;
+      }
+      out[0].width = Math.max(8, out[0].width);
+      return out;
+    };
     const esc = (w: string) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Words may be hyphenated across lines or split between runs.
+    const word = (w: string) => w.split('').map(esc).join('(?:-?\\s*)?');
+    // Between the whole quote's words, the PDF may print punctuation and the
+    // short words and citation numbers dropped above.
+    const between = '[^\\p{L}\\p{N}]+(?:[\\p{L}\\p{N}]{1,2}[^\\p{L}\\p{N}]+){0,2}';
+    // The whole quote first, so every line it spans is marked; failing that
+    // (markup that prints differently), just its first words.
+    const patterns = [words.map(word).join(between)];
     for (let n = Math.min(4, words.length); n >= 1; n--) {
       if (n === 1 && words[0].length < 4) break;
-      // Words may be hyphenated across lines or split between runs.
-      const pattern = new RegExp(words.slice(0, n).map((w) => w.split('').map(esc).join('(?:-?\\s*)?')).join('[\\s\\-]+'), 'giu');
+      patterns.push(words.slice(0, n).map(word).join('[\\s\\-]+'));
+    }
+    for (const source of patterns) {
       let best: TextSpot | null = null;
-      for (const m of text.matchAll(pattern)) {
-        const run = items[owner[m.index!]];
-        const y = run.top;
+      for (const m of text.matchAll(new RegExp(source, 'giu'))) {
+        const y = items[owner[m.index!]].top;
         const distance = y < top - 12 ? top - 12 - y : y > bottom + 4 ? y - bottom - 4 : 0;
         if (distance > 40) continue;
         if (best && Math.abs(best.y - (top + bottom) / 2) <= Math.abs(y - (top + bottom) / 2)) continue;
-        // Horizontal position inside the run, assuming even character widths;
-        // the highlight covers the match up to the end of its first line.
-        const runStart = owner.indexOf(owner[m.index!]);
-        const perChar = run.width / Math.max(1, run.str.length);
-        const offset = m.index! - runStart;
-        const onThisRun = Math.min(m[0].length, run.str.length - offset);
-        best = { x: run.x + offset * perChar, y, width: Math.max(8, onThisRun * perChar), height: run.size, exact: true };
+        const rects = boxes(m.index!, m.index! + m[0].length);
+        best = { ...rects[0], rects, exact: true };
       }
       if (best) return best;
     }
     // Printed words we could not find (odd markup, a ligature): the start of
     // the paragraph is close enough.
-    return { x: fallbackX, y: top, width: 12, height: 10, exact: false };
+    const box = { x: fallbackX, y: top, width: 12, height: 10 };
+    return { ...box, rects: [box], exact: false };
   }
 
   /** Pins in the right margin of each page; several on one spot stack. */
@@ -165,10 +211,10 @@ class PdfView {
       if (!p) continue;
       const s = this.scale;
       const open = (e: Event, anchor: HTMLElement) => { e.stopPropagation(); this.onPinClick?.(pin.id, anchor.getBoundingClientRect()); };
-      const mark = h('div', {
+      const marks = pin.rects.map((r) => h('div', {
         class: 'pdf-comment-mark', title: pin.title, 'data-thread': pin.id,
-        style: `left:${pin.x * s}px;top:${pin.y * s}px;width:${pin.width * s}px;height:${pin.height * s}px;--c:${pin.color}`,
-      });
+        style: `left:${r.x * s}px;top:${r.y * s}px;width:${r.width * s}px;height:${r.height * s}px;--c:${pin.color}`,
+      }));
       // Several comments on one line sit side by side in the margin.
       const row = `${pin.page}:${Math.round(pin.y / 6)}`;
       const n = stacked.get(row) ?? 0;
@@ -177,14 +223,15 @@ class PdfView {
         class: 'pdf-pin', title: pin.title, 'data-thread': pin.id,
         style: `right:${5 + n * 17}px;top:${pin.y * s + Math.max(0, (pin.height * s - 12) / 2)}px;--c:${pin.color}`,
       });
-      mark.addEventListener('click', (e) => open(e, mark));
+      for (const mark of marks) mark.addEventListener('click', (e) => open(e, mark));
       bubble.addEventListener('click', (e) => open(e, bubble));
-      for (const el of [mark, bubble]) {
+      const all = [...marks, bubble];
+      for (const el of all) {
         el.addEventListener('dblclick', (e) => e.stopPropagation());
-        el.addEventListener('mouseenter', () => { mark.classList.add('hot'); bubble.classList.add('hot'); });
-        el.addEventListener('mouseleave', () => { mark.classList.remove('hot'); bubble.classList.remove('hot'); });
+        el.addEventListener('mouseenter', () => { for (const x of all) x.classList.add('hot'); });
+        el.addEventListener('mouseleave', () => { for (const x of all) x.classList.remove('hot'); });
       }
-      p.el.append(mark, bubble);
+      p.el.append(...all);
     }
   }
 
