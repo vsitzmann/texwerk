@@ -254,7 +254,7 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
         // SyncTeX knows the paragraph; the PDF's own text says where the words are.
         const spot = await viewer.locate(pos.page, pos.top, pos.bottom, t.quote, pos.x);
         if (!spot) continue;
-        pins.push({ id: t.id, page: pos.page, x: spot.x, y: spot.y, width: spot.width, height: spot.height, color: colorFor(t.login.replace(/:agent$/, '')), title: `${t.messages[0]?.author}: ${t.messages[0]?.text ?? ''}`.slice(0, 200) });
+        pins.push({ id: t.id, page: pos.page, x: spot.x, y: spot.y, width: spot.width, height: spot.height, rects: spot.rects, color: colorFor(t.login.replace(/:agent$/, '')), title: `${t.messages[0]?.author}: ${t.messages[0]?.text ?? ''}`.slice(0, 200) });
       }
       if (request !== pinsRequest) return;
       viewer.setPins(pins);
