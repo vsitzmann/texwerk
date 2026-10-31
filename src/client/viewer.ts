@@ -67,7 +67,7 @@ class PdfView {
   private readonly pagesEl = h('div', { class: 'pdf-pages' });
   private doc: PDFDocumentProxy | null = null;
   private task: PDFDocumentLoadingTask | null = null;
-  private pages: Array<{ el: HTMLDivElement; page: PDFPageProxy; rendered: number; width: number; height: number }> = [];
+  private pages: Array<{ el: HTMLDivElement; page: PDFPageProxy; rendered: number; width: number; height: number; links: boolean }> = [];
   private observer: IntersectionObserver;
   scale = 1;
   fitWidth = true;
@@ -218,7 +218,7 @@ class PdfView {
         const rect = el.getBoundingClientRect();
         this.onDoubleClick?.(i, (e.clientX - rect.left) / this.scale, (e.clientY - rect.top) / this.scale);
       });
-      pages.push({ el, page, rendered: 0, width: vp.width, height: vp.height });
+      pages.push({ el, page, rendered: 0, width: vp.width, height: vp.height, links: false });
     }
     if (token !== this.loadToken) { void task.destroy(); return; }
     // Keep the reader's place: same relative scroll position in the new PDF.
@@ -303,6 +303,7 @@ class PdfView {
     const scale = this.scale * (window.devicePixelRatio || 1);
     if (p.rendered === scale) return;
     p.rendered = scale;
+    if (!p.links) { p.links = true; void this.addLinks(p); }
     const viewport = p.page.getViewport({ scale });
     const canvas = h('canvas') as HTMLCanvasElement;
     canvas.width = Math.floor(viewport.width);
@@ -316,6 +317,55 @@ class PdfView {
     if (p.rendered !== scale) return;
     p.el.querySelector('canvas')?.remove();
     p.el.prepend(canvas);
+  }
+
+  /**
+   * The page's hyperlinks (hyperref's \url, \ref, \cite, the table of
+   * contents) as clickable boxes over the canvas. Positioned in percent of
+   * the page, so zooming needs no redraw; under the comment marks, which
+   * come later.
+   */
+  private async addLinks(p: (typeof this.pages)[number]): Promise<void> {
+    let annotations: Array<{ subtype: string; rect: number[]; url?: string; dest?: string | unknown[] }>;
+    try { annotations = await p.page.getAnnotations(); } catch { p.links = false; return; }
+    const vp = p.page.getViewport({ scale: 1 });
+    const boxes: HTMLElement[] = [];
+    for (const a of annotations) {
+      if (a.subtype !== 'Link' || (!a.url && !a.dest)) continue;
+      const [x1, y1] = vp.convertToViewportPoint(a.rect[0], a.rect[1]);
+      const [x2, y2] = vp.convertToViewportPoint(a.rect[2], a.rect[3]);
+      const style = `left:${(Math.min(x1, x2) / p.width) * 100}%;top:${(Math.min(y1, y2) / p.height) * 100}%;`
+        + `width:${(Math.abs(x2 - x1) / p.width) * 100}%;height:${(Math.abs(y2 - y1) / p.height) * 100}%`;
+      // pdf.js only fills `url` for safe schemes (http, https, mailto, …).
+      const link = a.url
+        ? h('a', { class: 'pdf-link', href: a.url, target: '_blank', rel: 'noopener noreferrer', title: a.url, style })
+        : h('a', { class: 'pdf-link', href: '#', style, onclick: (e: Event) => { e.preventDefault(); void this.goTo(a.dest!); } });
+      link.addEventListener('dblclick', (e) => e.stopPropagation());
+      boxes.push(link);
+    }
+    p.el.prepend(...boxes);
+  }
+
+  /** Follow an internal link: a named or explicit PDF destination. */
+  private async goTo(dest: string | unknown[]): Promise<void> {
+    const doc = this.doc;
+    if (!doc) return;
+    try {
+      const explicit = typeof dest === 'string' ? await doc.getDestination(dest) : dest;
+      if (!explicit) return;
+      const [ref, mode, ...args] = explicit as [unknown, { name?: string } | undefined, ...unknown[]];
+      const index = typeof ref === 'number' ? ref : await doc.getPageIndex(ref as Parameters<typeof doc.getPageIndex>[0]);
+      if (doc !== this.doc) return;
+      const p = this.pages[index];
+      if (!p) return;
+      // The destination's top edge, where the mode has one; else the page's top.
+      const top = { XYZ: args[1], FitH: args[0], FitBH: args[0], FitR: args[3] }[mode?.name ?? ''];
+      const y = typeof top === 'number' ? Math.max(0, p.page.getViewport({ scale: 1 }).convertToViewportPoint(0, top)[1]) : 0;
+      this.scroll.scrollTo({ top: p.el.offsetTop + y * this.scale - 8, behavior: 'smooth' });
+      const marker = h('div', { class: 'pdf-marker', style: `top:${y * this.scale}px` });
+      p.el.append(marker);
+      setTimeout(() => marker.remove(), 2000);
+    } catch { /* a dangling destination: stay put */ }
   }
 
   /** Scroll to a SyncTeX position (PDF points from the page's top-left). */
