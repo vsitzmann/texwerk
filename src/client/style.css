@@ -715,6 +715,7 @@ button.picker-row.active { border-color: var(--accent); }
 .picker-live { color: var(--accent) !important; font-weight: 600 !important; }
 .picker-folder .picker-name::before { content: '📁  '; }
 .picker-row-button { flex: none; }
+.picker-more { display: none; }
 
 /* Share dialog: two questions — which people, then everyone else. */
 .share-body { display: flex; flex-direction: column; gap: 16px; }
@@ -756,6 +757,69 @@ button.busy { opacity: .75; cursor: progress; }
   .picker { --picker-columns: minmax(0, 1fr) 90px; width: 100vw; height: 100vh; }
   .picker-row .picker-cell:nth-child(n+4) { display: none; }
   .picker-actions { width: auto; }
+}
+
+/* On a phone the projects browser is the whole page, and a row is a name with
+   a line of facts under it — size, last edit, who is in it, owner, access —
+   instead of columns. A row's buttons fold away behind its ⋯. */
+@media (max-width: 640px) {
+  .picker-overlay { place-items: stretch; }
+  .picker {
+    --picker-gutter: 12px;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    border: 0;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+  }
+  .picker-head { flex-wrap: wrap; gap: 6px; }
+  .picker-head h2 { font-size: 12px; }
+  .picker-trail { flex-basis: 100%; order: 3; }
+  .picker-who { margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .picker-columns { display: none; }
+  .picker-list { padding-top: 6px; padding-bottom: 6px; }
+  .picker-group { margin-top: 18px; padding: 0 10px 4px; }
+  .picker-row-group { flex-wrap: wrap; gap: 0; border-bottom: 1px solid var(--line); }
+  .picker-row {
+    display: flex;
+    min-height: 52px;
+    flex-wrap: wrap;
+    align-content: center;
+    gap: 3px 10px;
+    padding: 9px 10px;
+  }
+  .picker-name { flex: 1 0 100%; font-size: 15px; }
+  .picker-row .picker-cell:nth-child(n+4) { display: revert; }
+  /* Created: last edit says more on a small screen. */
+  .picker-row .picker-cell:nth-child(4), .picker-row .picker-cell:empty { display: none; }
+  .picker-cell { max-width: 100%; }
+  .picker-more {
+    display: block;
+    flex: none;
+    width: 44px;
+    min-height: 44px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--muted);
+    font-size: 18px;
+  }
+  .picker-row-group.open .picker-more { color: var(--text); }
+  .picker-actions { display: none; }
+  .picker-row-group.open .picker-actions {
+    display: flex;
+    flex: 1 0 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 6px;
+    padding: 0 10px 10px;
+  }
+  .picker-row-button { min-height: 36px; }
+  .picker-crumb { min-height: 32px; }
+  .picker-foot { flex-wrap: wrap; padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+  .picker-foot .picker-progress { flex-basis: 100%; }
+  .picker-footer-actions { flex: 1 0 100%; flex-wrap: wrap; margin-left: 0; }
+  .picker-footer-actions > * { flex: 1 1 auto; min-height: 40px; }
 }
 
 .deploy-key { display: flex; flex-direction: column; gap: 8px; }

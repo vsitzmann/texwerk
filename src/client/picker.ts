@@ -75,9 +75,20 @@ function pickerRow(tag: 'button' | 'div', name: string, cells: string[]): HTMLEl
   return row;
 }
 
-/** A row with the fixed-width slot its buttons live in, so columns align. */
+/**
+ * A row with the fixed-width slot its buttons live in, so columns align. On a
+ * phone the buttons fold away behind a ⋯ instead (style.css); on a wider
+ * screen the ⋯ is hidden and the buttons always show.
+ */
 function rowGroup(row: HTMLElement, buttons: HTMLElement[]): HTMLElement {
-  return h('div', { class: 'picker-row-group' }, row, h('div', { class: 'picker-actions' }, ...buttons));
+  const group = h('div', { class: 'picker-row-group' }, row);
+  if (buttons.length > 0) {
+    const more = h('button', { class: 'picker-more', title: 'Rename, move, share or delete', 'aria-expanded': 'false' }, '⋯');
+    more.addEventListener('click', () => more.setAttribute('aria-expanded', String(group.classList.toggle('open'))));
+    group.append(more);
+  }
+  group.append(h('div', { class: 'picker-actions' }, ...buttons));
+  return group;
 }
 
 function rowButton(label: string, hint: string, onClick: () => void): HTMLButtonElement {
