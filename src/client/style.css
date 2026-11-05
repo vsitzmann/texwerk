@@ -737,8 +737,10 @@ button.picker-row.active { border-color: var(--accent); }
 .share-add { display: flex; gap: 6px; }
 .share-add input { flex: 1; min-width: 0; }
 
+.large-files .bad { color: var(--danger); }
 /* The compiled PDF's size in the menu bar: green, yellow, red as it grows. */
 .toolbar .pdf-info { display: inline-flex; gap: 8px; align-items: center; background: none; }
+.toolbar .pdf-info[hidden] { display: none; }
 .toolbar .pdf-info.ok { border-color: color-mix(in srgb, var(--green) 45%, transparent); }
 .toolbar .pdf-info.warn { border-color: var(--yellow); }
 .toolbar .pdf-info.bad { border-color: var(--danger); }

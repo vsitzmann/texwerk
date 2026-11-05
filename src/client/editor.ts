@@ -2,7 +2,7 @@ import * as Y from 'yjs';
 import { Awareness } from 'y-protocols/awareness';
 import { colorFor } from '@shared/files.ts';
 import { Provider } from '@shared/provider.ts';
-import { formatMegabytes, pdfSizeLevel, PDF_SIZE_BAD, PDF_SIZE_WARN, type BinInfo, type CompileSummary, type Identity, type ProjectSettings, type ServerEvent } from '@shared/protocol.ts';
+import { formatMegabytes, GITHUB_MAX_FILE_BYTES, LARGE_FILE_BYTES, pdfSizeLevel, PDF_SIZE_BAD, PDF_SIZE_WARN, type BinInfo, type CompileSummary, type Identity, type ProjectSettings, type ServerEvent } from '@shared/protocol.ts';
 import { CodeEditor } from './codeEditor.ts';
 import { FileTree } from './tree.ts';
 import { HistoryView } from './historyView.ts';
@@ -12,7 +12,7 @@ import { Chat } from './chat.ts';
 import { authorRuns } from '@shared/provenance.ts';
 import type { AuthorInfo } from '@shared/protocol.ts';
 import type { CommentThread } from '@shared/comments.ts';
-import { api, copyText, dialog, h, initials, menu, storedName, storeName, toast, withName } from './ui.ts';
+import { api, ApiError, copyText, dialog, h, initials, menu, storedName, storeName, toast, withName } from './ui.ts';
 import { showPicker, showShareDialog, type Me } from './picker.ts';
 
 /**
@@ -765,6 +765,44 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
   }
   historyBtn.addEventListener('click', openHistory);
 
+  // ------------------------------------------------------------ large files
+  type LargeFile = { path: string; bytes: number };
+
+  function confirmLargeFiles(files: LargeFile[]): Promise<boolean> {
+    return new Promise((resolve) => {
+      let proceed = false;
+      const refused = files.some((f) => f.bytes > GITHUB_MAX_FILE_BYTES);
+      dialog((close) => [
+        h('h2', {}, `Commit ${files.length === 1 ? 'a large file' : `${files.length} large files`}?`),
+        h('ul', { class: 'large-files' }, ...files.map((f) => h('li', {},
+          h('code', {}, f.path), ` — ${formatMegabytes(f.bytes)}`,
+          f.bytes > GITHUB_MAX_FILE_BYTES ? h('span', { class: 'bad' }, ' (too big for GitHub)') : ''))),
+        h('p', {}, `These files are ${LARGE_FILE_BYTES / 1e6} MB or more. Git keeps every version of a file for good: once committed and pushed, `,
+          'they stay in the repository\'s history and every clone downloads them, even after you delete or shrink them. ',
+          refused ? 'GitHub refuses files over 100 MB, so a push would fail.' : 'GitHub warns about files over 50 MB and refuses them over 100 MB.'),
+        h('p', { class: 'muted' }, 'Shrinking a figure first is usually easy: 300 dpi JPEG images are plenty for a paper, and the PDF size button next to Recompile shows how.'),
+        h('div', { class: 'actions' },
+          h('button', { class: 'primary', onclick: close }, 'Cancel'),
+          h('button', { class: 'danger', onclick: () => { proceed = true; close(); } }, 'Proceed anyway')),
+      ], { onClose: () => resolve(proceed) });
+    });
+  }
+
+  /**
+   * Send a request that commits. When the server answers with large files
+   * instead, ask, and send it again with `allowLarge` — or return null.
+   */
+  async function committing<T>(send: (allowLarge: boolean) => Promise<T>): Promise<T | null> {
+    try {
+      return await send(false);
+    } catch (err) {
+      const files = err instanceof ApiError && err.status === 409 ? err.data.largeFiles as LargeFile[] | undefined : undefined;
+      if (!files?.length) throw err;
+      if (!await confirmLargeFiles(files)) return null;
+      return send(true);
+    }
+  }
+
   function openLabelDialog(): void {
     dialog((close) => {
       const input = h('input', { placeholder: 'e.g. Submitted to NeurIPS', spellcheck: 'false' });
@@ -774,7 +812,8 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
         if (!message) { input.focus(); return; }
         go.disabled = true;
         try {
-          await api('POST', `/api/label?project=${encodeURIComponent(project)}`, { message });
+          const done = await committing((allowLarge) => api('POST', `/api/label?project=${encodeURIComponent(project)}`, { message, allowLarge }));
+          if (!done) { go.disabled = false; input.focus(); return; }
           close();
           toast(`Labelled "${message}"`, 'ok');
           if (historyView) scheduleHistoryRefresh();
@@ -885,7 +924,8 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
         h('div', { class: 'row' },
           h('button', { onclick: openLabelDialog }, 'Label version…'),
           h('span', { class: 'spacer' }),
-          h('button', { onclick: () => void run('Pulling', () => api('POST', `/api/git/pull?project=${encodeURIComponent(project)}`)) }, 'Pull'),
+          h('button', { onclick: () => void run('Pulling', async () => (await committing((allowLarge) => api<{ output?: string }>('POST', `/api/git/pull?project=${encodeURIComponent(project)}`, { allowLarge })))
+            ?? { output: 'Pull cancelled: nothing was committed or pulled.' }) }, 'Pull'),
           h('button', { class: 'primary', onclick: () => void run('Pushing', () => api('POST', `/api/git/push?project=${encodeURIComponent(project)}`)) }, 'Push')),
         out,
         h('h3', {}, 'Deploy key'),
