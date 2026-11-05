@@ -50,6 +50,22 @@ export interface TextSpot {
   exact: boolean;
 }
 
+/**
+ * A page that takes this long to draw, or has this many drawing operations,
+ * makes the PDF slow to view. Operations are counted the way PDF.js runs them:
+ * a scatter plot exported as vectors costs several per point, so 100,000
+ * points is the better part of a million.
+ */
+const SLOW_PAGE_MS = 1500;
+const HEAVY_PAGE_OPS = 150_000;
+
+/** A page of the compiled PDF that is slow to draw. */
+export interface SlowPage {
+  page: number;
+  ms: number;
+  ops: number;
+}
+
 export interface ViewerOptions {
   project: () => string;
   onJumpToSource: (file: string, line: number) => void;
@@ -60,6 +76,8 @@ export interface ViewerOptions {
   onPdfLoaded: () => void;
   /** The visible tab changed (the chat marks itself read). */
   onTabChange?: (tab: Tab) => void;
+  /** Pages of the compiled PDF found slow to draw so far (empty for a new PDF). */
+  onSlowPages?: (pages: SlowPage[]) => void;
 }
 
 class PdfView {
@@ -67,7 +85,7 @@ class PdfView {
   private readonly pagesEl = h('div', { class: 'pdf-pages' });
   private doc: PDFDocumentProxy | null = null;
   private task: PDFDocumentLoadingTask | null = null;
-  private pages: Array<{ el: HTMLDivElement; page: PDFPageProxy; rendered: number; width: number; height: number }> = [];
+  private pages: Array<{ el: HTMLDivElement; page: PDFPageProxy; rendered: number; drawn?: boolean; width: number; height: number }> = [];
   private observer: IntersectionObserver;
   scale = 1;
   fitWidth = true;
@@ -75,6 +93,8 @@ class PdfView {
   onZoom: (() => void) | null = null;
   onDoubleClick: ((page: number, x: number, y: number) => void) | null = null;
   onPinClick: ((id: string, rect: DOMRect) => void) | null = null;
+  /** Each page's first draw: how long it took and how many operations it ran. */
+  onPageDrawn: ((page: number, ms: number, ops: number) => void) | null = null;
   private pins: PdfPin[] = [];
 
   private textCache = new Map<number, Promise<TextRun[]>>();
@@ -297,18 +317,38 @@ class PdfView {
     this.applyScale(this.fitScale());
   }
 
-  private async renderPage(index: number): Promise<void> {
+  /** Pages draw one at a time, so each one's time is its own (and the first visible comes first). */
+  private drawing: Promise<void> = Promise.resolve();
+
+  private renderPage(index: number): Promise<void> {
     const p = this.pages[index];
-    if (!p) return;
+    if (!p) return Promise.resolve();
     const scale = this.scale * (window.devicePixelRatio || 1);
-    if (p.rendered === scale) return;
+    if (p.rendered === scale) return Promise.resolve();
     p.rendered = scale;
+    const turn = this.drawing.then(() => this.drawPage(p, index, scale));
+    this.drawing = turn.catch(() => {});
+    return turn;
+  }
+
+  private async drawPage(p: (typeof this.pages)[number], index: number, scale: number): Promise<void> {
+    // Zoomed again, or a newer PDF arrived, while this one waited its turn.
+    if (p.rendered !== scale || !this.pages.includes(p)) return;
     const viewport = p.page.getViewport({ scale });
     const canvas = h('canvas') as HTMLCanvasElement;
     canvas.width = Math.floor(viewport.width);
     canvas.height = Math.floor(viewport.height);
+    const first = !p.drawn;
+    const started = performance.now();
     try {
-      await p.page.render({ canvas, viewport }).promise;
+      const task = p.page.render({ canvas, viewport });
+      await task.promise;
+      if (first) {
+        p.drawn = true;
+        // PDF.js does not publish the operator list a render ran; it is there all the same.
+        const ops = (task as unknown as { _internalRenderTask?: { operatorList?: { fnArray?: unknown[] } } })._internalRenderTask?.operatorList?.fnArray?.length ?? 0;
+        this.onPageDrawn?.(index + 1, performance.now() - started, ops);
+      }
     } catch {
       p.rendered = 0;
       return;
@@ -359,8 +399,15 @@ export class Viewer {
     this.pdf.onZoom = () => this.renderTabs();
     this.pdf.onDoubleClick = (page, x, y) => void this.syncToSource(page, x, y);
     this.pdf.onPinClick = (id, rect) => this.opts.onPinClick(id, rect);
+    this.pdf.onPageDrawn = (page, ms, ops) => {
+      if (ms < SLOW_PAGE_MS && ops < HEAVY_PAGE_OPS) return;
+      this.slowPages = [...this.slowPages.filter((s) => s.page !== page), { page, ms, ops }].sort((a, b) => a.page - b.page);
+      this.opts.onSlowPages?.(this.slowPages);
+    };
     this.render();
   }
+
+  private slowPages: SlowPage[] = [];
 
   setCompile(summary: CompileSummary, output?: string, log?: string): void {
     this.compile = summary;
@@ -369,6 +416,10 @@ export class Viewer {
     if (summary.state === 'done' && summary.hasPdf && summary.rev !== this.lastPdfRev) {
       this.lastPdfRev = summary.rev;
       this.loadingPdf = true;
+      if (this.slowPages.length) {
+        this.slowPages = [];
+        this.opts.onSlowPages?.([]);
+      }
       void this.pdf.load(withName(`/pdf/${encodeURIComponent(this.opts.project())}/output.pdf?rev=${summary.rev}`))
         .finally(() => { this.loadingPdf = false; this.render(); this.opts.onPdfLoaded(); });
     }

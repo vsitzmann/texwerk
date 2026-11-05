@@ -147,7 +147,10 @@ must not be exposed to the open internet.
   **Label version** commits the whole project, authored by you, and the label
   appears in the history, where the project can be reverted to it. **Git…**
   sets a remote and pushes/pulls; it can generate the server's SSH key to add
-  as a deploy key.
+  as a deploy key. A blanket `*.pdf` rule in the repository's `.gitignore`
+  (common in LaTeX templates) keeps out only compiled PDFs (`main.pdf` next
+  to a `main.tex` with `\documentclass`): figure PDFs are committed anyway, so
+  a clone compiles. More specific rules (a named file, a folder) are obeyed.
 - **Files.** Overleaf-style file tree: drag and drop files or whole folders
   from the desktop (onto the tree, a folder, or anywhere in the window), move
   files by dragging, rename, delete (restorable from history), set the main
@@ -162,6 +165,12 @@ must not be exposed to the open internet.
   that are buggy in the server's TeX Live (lineno), found after the project's
   own files and before TeX Live's. The Log tab lists errors and warnings with
   links to the line, and the raw latexmk output and TeX log.
+- **PDF size and speed.** The menu bar shows the compiled PDF's size: green
+  below 15 MB, yellow below 40 MB, red above, since every viewer downloads the
+  whole PDF after each compile. It also warns when a page is slow to draw
+  (1.5 s, or 150,000 drawing operations: a vector scatter plot with tens of
+  thousands of points). A click lists the largest files the paper includes
+  and the slow pages, with how to shrink or rasterize them.
 - **Download** the project as a .zip or the compiled PDF at any time. New
   projects from a template, from an uploaded .zip, or by cloning a git repo.
 

@@ -737,6 +737,14 @@ button.picker-row.active { border-color: var(--accent); }
 .share-add { display: flex; gap: 6px; }
 .share-add input { flex: 1; min-width: 0; }
 
+/* The compiled PDF's size in the menu bar: green, yellow, red as it grows. */
+.toolbar .pdf-info { display: inline-flex; gap: 8px; align-items: center; background: none; }
+.toolbar .pdf-info.ok { border-color: color-mix(in srgb, var(--green) 45%, transparent); }
+.toolbar .pdf-info.warn { border-color: var(--yellow); }
+.toolbar .pdf-info.bad { border-color: var(--danger); }
+.pdf-info .size.ok, .pdf-size-text.ok { color: var(--green); }
+.pdf-info .size.warn, .pdf-size-text.warn { color: var(--yellow); }
+.pdf-info .size.bad, .pdf-size-text.bad, .pdf-info .slow { color: var(--danger); }
 .readonly-badge { padding: 1px 6px; border: 1px solid var(--yellow); color: var(--yellow); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
 
 button.busy { opacity: .75; cursor: progress; }
