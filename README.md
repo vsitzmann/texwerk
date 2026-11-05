@@ -164,7 +164,10 @@ must not be exposed to the open internet.
   zoom, SyncTeX both ways: double-click the PDF to jump to the source;
   double-click the source — which still selects the word — or press
   `Ctrl+Alt+→` / ⇢ to jump to that place in the PDF), or the image/PDF
-  selected in the file tree.
+  selected in the file tree. Double-clicking an included figure (an image or
+  PDF placed by `\includegraphics`) opens a small menu right there: **Jump
+  into figure** shows its file, **Jump to where it is included** goes to the
+  `\includegraphics` line.
 - **Compile.** `latexmk` with pdfLaTeX, XeLaTeX or LuaLaTeX; auto-compile after
   edits or `Ctrl+S` / `Ctrl+Enter`. `tex/` holds fixed versions of packages
   that are buggy in the server's TeX Live (lineno), found after the project's
