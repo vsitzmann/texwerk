@@ -6,13 +6,14 @@ import { formatMegabytes, GITHUB_MAX_FILE_BYTES, LARGE_FILE_BYTES, pdfSizeLevel,
 import { CodeEditor } from './codeEditor.ts';
 import { FileTree } from './tree.ts';
 import { HistoryView } from './historyView.ts';
-import { Viewer, type PdfPin, type SlowPage } from './viewer.ts';
+import { Viewer, type FigureClick, type PdfPin, type SlowPage } from './viewer.ts';
 import { Comments } from './comments.ts';
 import { Chat } from './chat.ts';
 import { authorRuns } from '@shared/provenance.ts';
+import { findInclude, graphicsPaths, resolveGraphic } from '@shared/figures.ts';
 import type { AuthorInfo } from '@shared/protocol.ts';
 import type { CommentThread } from '@shared/comments.ts';
-import { api, ApiError, copyText, dialog, h, initials, menu, storedName, storeName, toast, withName } from './ui.ts';
+import { api, ApiError, copyText, dialog, h, initials, menu, menuAt, storedName, storeName, toast, withName } from './ui.ts';
 import { showPicker, showShareDialog, type Me } from './picker.ts';
 
 /**
@@ -175,7 +176,33 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
     onPdfLoaded: () => schedulePins(0),
     onTabChange: (tab) => { if (tab === 'chat') chat.shown(); },
     onSlowPages: (pages) => { slowPages = pages; renderPdfInfo(); },
+    onFigureDoubleClick: (click) => void figureMenu(click),
   });
+
+  /**
+   * A double-click on an included figure: a small menu right there, to open
+   * the figure's file or go to the \includegraphics that places it. Anything
+   * else (or a figure we cannot trace) jumps to the source as before.
+   */
+  async function figureMenu(click: FigureClick): Promise<void> {
+    const at = await viewer.sourceAt(click.page, click.x, click.y);
+    if (!at) return;
+    const source = texts.get(at.file)?.toString();
+    const include = source ? findInclude(source, at.line, click.index, click.count) : null;
+    if (!include) { openFile(at.file, at.line); return; }
+    const files = [...texts.keys(), ...bins.keys()];
+    const graphic = resolveGraphic(include.name, files, graphicsPaths([...texts.values()].map((t) => t.toString())));
+    menuAt(click.clientX, click.clientY, [
+      h('div', { class: 'menu-head figure-name', title: graphic ?? include.name }, graphic ?? include.name),
+      h('button', {
+        disabled: !graphic,
+        title: graphic ? `Show ${graphic}` : `No file in the project matches "${include.name}"`,
+        onclick: () => graphic && openFile(graphic),
+      }, 'Jump into figure'),
+      h('button', { onclick: () => openFile(at.file, include.line) },
+        'Jump to where it is included', h('span', { class: 'hint' }, `${at.file.split('/').pop()}:${include.line}`)),
+    ]);
+  }
 
   // ------------------------------------------------------------ PDF weight
   let slowPages: SlowPage[] = [];

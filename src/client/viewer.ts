@@ -66,6 +66,85 @@ export interface SlowPage {
   ops: number;
 }
 
+/** A figure on a page: an image or an embedded PDF, in PDF points from the page's top-left. */
+interface FigureBox {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+/** A double-click on a figure in the compiled PDF. */
+export interface FigureClick {
+  page: number;
+  /** The figure's centre, in PDF points from the page's top-left (what SyncTeX takes). */
+  x: number;
+  y: number;
+  /** Its place among the figures side by side with it, counted from the left. */
+  index: number;
+  count: number;
+  /** Where the double-click was, in the window. */
+  clientX: number;
+  clientY: number;
+}
+
+type Matrix = [number, number, number, number, number, number];
+const multiply = (m: Matrix, n: Matrix): Matrix => [
+  m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1],
+  m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3],
+  m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5],
+];
+
+/**
+ * The figures a page draws, from the operator list PDF.js rendered it with:
+ * every image, and every embedded PDF (a form XObject, which is how
+ * \includegraphics places a PDF), at the top level only, so the plot inside
+ * an included PDF is not a figure of its own. Boxes are in PDF user space.
+ */
+function figureBoxes(fnArray: number[], argsArray: unknown[][]): Array<[number, number, number, number]> {
+  const { OPS } = pdfjs;
+  const boxes: Array<[number, number, number, number]> = [];
+  const stack: Matrix[] = [];
+  let ctm: Matrix = [1, 0, 0, 1, 0, 0];
+  let depth = 0;
+  // A form with a transparency group carries its bounding box on the group.
+  let groupBox: [number, number, number, number] | null = null;
+  const place = (m: Matrix, x0: number, y0: number, x1: number, y1: number) => {
+    const xs: number[] = [];
+    const ys: number[] = [];
+    for (const [x, y] of [[x0, y0], [x1, y0], [x0, y1], [x1, y1]]) {
+      xs.push(m[0] * x + m[2] * y + m[4]);
+      ys.push(m[1] * x + m[3] * y + m[5]);
+    }
+    boxes.push([Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)]);
+  };
+  for (let i = 0; i < fnArray.length; i++) {
+    const fn = fnArray[i];
+    const args = argsArray[i];
+    if (fn === OPS.save) stack.push(ctm);
+    else if (fn === OPS.restore) ctm = stack.pop() ?? ctm;
+    else if (fn === OPS.transform) ctm = multiply(ctm, args as Matrix);
+    else if (fn === OPS.beginGroup) {
+      const bbox = (args[0] as { bbox?: ArrayLike<number> | null } | undefined)?.bbox;
+      groupBox = bbox ? [bbox[0], bbox[1], bbox[2], bbox[3]] : null;
+    } else if (fn === OPS.paintFormXObjectBegin) {
+      const [matrix, bbox] = args as [Matrix | null, [number, number, number, number] | null];
+      stack.push(ctm);
+      if (matrix) ctm = multiply(ctm, [...matrix] as Matrix);
+      const box = bbox ?? groupBox;
+      groupBox = null;
+      if (depth === 0 && box) place(ctm, ...box);
+      depth++;
+    } else if (fn === OPS.paintFormXObjectEnd) {
+      ctm = stack.pop() ?? ctm;
+      depth--;
+    } else if (depth === 0 && (fn === OPS.paintImageXObject || fn === OPS.paintInlineImageXObject || fn === OPS.paintImageMaskXObject)) {
+      place(ctm, 0, 0, 1, 1);
+    }
+  }
+  return boxes;
+}
+
 export interface ViewerOptions {
   project: () => string;
   onJumpToSource: (file: string, line: number) => void;
@@ -76,6 +155,8 @@ export interface ViewerOptions {
   onPdfLoaded: () => void;
   /** The visible tab changed (the chat marks itself read). */
   onTabChange?: (tab: Tab) => void;
+  /** A figure in the compiled PDF was double-clicked (instead of jumping to the source). */
+  onFigureDoubleClick?: (click: FigureClick) => void;
   /** Pages of the compiled PDF found slow to draw so far (empty for a new PDF). */
   onSlowPages?: (pages: SlowPage[]) => void;
 }
@@ -85,13 +166,13 @@ class PdfView {
   private readonly pagesEl = h('div', { class: 'pdf-pages' });
   private doc: PDFDocumentProxy | null = null;
   private task: PDFDocumentLoadingTask | null = null;
-  private pages: Array<{ el: HTMLDivElement; page: PDFPageProxy; rendered: number; drawn?: boolean; width: number; height: number }> = [];
+  private pages: Array<{ el: HTMLDivElement; page: PDFPageProxy; rendered: number; drawn?: boolean; figures?: FigureBox[]; width: number; height: number }> = [];
   private observer: IntersectionObserver;
   scale = 1;
   fitWidth = true;
   private loadToken = 0;
   onZoom: (() => void) | null = null;
-  onDoubleClick: ((page: number, x: number, y: number) => void) | null = null;
+  onDoubleClick: ((page: number, x: number, y: number, clientX: number, clientY: number) => void) | null = null;
   onPinClick: ((id: string, rect: DOMRect) => void) | null = null;
   /** Each page's first draw: how long it took and how many operations it ran. */
   onPageDrawn: ((page: number, ms: number, ops: number) => void) | null = null;
@@ -236,7 +317,7 @@ class PdfView {
       const el = h('div', { class: 'pdf-page', 'data-index': String(i - 1) }) as HTMLDivElement;
       el.addEventListener('dblclick', (e) => {
         const rect = el.getBoundingClientRect();
-        this.onDoubleClick?.(i, (e.clientX - rect.left) / this.scale, (e.clientY - rect.top) / this.scale);
+        this.onDoubleClick?.(i, (e.clientX - rect.left) / this.scale, (e.clientY - rect.top) / this.scale, e.clientX, e.clientY);
       });
       pages.push({ el, page, rendered: 0, width: vp.width, height: vp.height });
     }
@@ -346,7 +427,15 @@ class PdfView {
       if (first) {
         p.drawn = true;
         // PDF.js does not publish the operator list a render ran; it is there all the same.
-        const ops = (task as unknown as { _internalRenderTask?: { operatorList?: { fnArray?: unknown[] } } })._internalRenderTask?.operatorList?.fnArray?.length ?? 0;
+        const list = (task as unknown as { _internalRenderTask?: { operatorList?: { fnArray?: number[]; argsArray?: unknown[][] } } })._internalRenderTask?.operatorList;
+        const ops = list?.fnArray?.length ?? 0;
+        // Figures, in PDF points from the page's top-left like the clicks.
+        const vp = p.page.getViewport({ scale: 1 });
+        p.figures = list?.fnArray && list.argsArray ? figureBoxes(list.fnArray, list.argsArray).map(([x0, y0, x1, y1]) => {
+          const [ax, ay] = vp.convertToViewportPoint(x0, y0);
+          const [bx, by] = vp.convertToViewportPoint(x1, y1);
+          return { x0: Math.min(ax, bx), y0: Math.min(ay, by), x1: Math.max(ax, bx), y1: Math.max(ay, by) };
+        }).filter((b) => b.x1 - b.x0 >= 4 && b.y1 - b.y0 >= 4) : [];
         this.onPageDrawn?.(index + 1, performance.now() - started, ops);
       }
     } catch {
@@ -356,6 +445,22 @@ class PdfView {
     if (p.rendered !== scale) return;
     p.el.querySelector('canvas')?.remove();
     p.el.prepend(canvas);
+  }
+
+  /**
+   * The figure under a point (PDF points from the page's top-left): the
+   * smallest one containing it, with its place among the figures beside it.
+   */
+  figureAt(pageNumber: number, x: number, y: number): { x: number; y: number; index: number; count: number } | null {
+    const figures = this.pages[pageNumber - 1]?.figures ?? [];
+    const hits = figures.filter((b) => x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1);
+    if (!hits.length) return null;
+    const hit = hits.reduce((a, b) => ((b.x1 - b.x0) * (b.y1 - b.y0) < (a.x1 - a.x0) * (a.y1 - a.y0) ? b : a));
+    // Side by side: overlapping the hit vertically by at least half the smaller height.
+    const row = figures.filter((b) => Math.min(b.y1, hit.y1) - Math.max(b.y0, hit.y0) >= Math.min(b.y1 - b.y0, hit.y1 - hit.y0) / 2
+      && !(b !== hit && b.x0 <= hit.x0 && b.x1 >= hit.x1)) // not a figure that contains this one
+      .sort((a, b) => a.x0 - b.x0);
+    return { x: (hit.x0 + hit.x1) / 2, y: (hit.y0 + hit.y1) / 2, index: Math.max(0, row.indexOf(hit)), count: row.length };
   }
 
   /** Scroll to a SyncTeX position (PDF points from the page's top-left). */
@@ -397,7 +502,11 @@ export class Viewer {
     this.opts = opts;
     this.root.append(this.tabs, this.body);
     this.pdf.onZoom = () => this.renderTabs();
-    this.pdf.onDoubleClick = (page, x, y) => void this.syncToSource(page, x, y);
+    this.pdf.onDoubleClick = (page, x, y, clientX, clientY) => {
+      const figure = this.opts.onFigureDoubleClick ? this.pdf.figureAt(page, x, y) : null;
+      if (figure) this.opts.onFigureDoubleClick!({ page, ...figure, clientX, clientY });
+      else void this.syncToSource(page, x, y);
+    };
     this.pdf.onPinClick = (id, rect) => this.opts.onPinClick(id, rect);
     this.pdf.onPageDrawn = (page, ms, ops) => {
       if (ms < SLOW_PAGE_MS && ops < HEAVY_PAGE_OPS) return;
@@ -495,10 +604,16 @@ export class Viewer {
     this.pdf.reveal(page, y);
   }
 
-  private async syncToSource(page: number, x: number, y: number): Promise<void> {
+  /** The source line SyncTeX gives for a point in the compiled PDF. */
+  async sourceAt(page: number, x: number, y: number): Promise<{ file: string; line: number } | null> {
     const r = await fetch(withName(`/api/synctex/edit?project=${encodeURIComponent(this.opts.project())}&page=${page}&x=${x}&y=${y}`));
     const data = await r.json() as { file: string | null; line?: number };
-    if (data.file && data.line) this.opts.onJumpToSource(data.file, data.line);
+    return data.file && data.line ? { file: data.file, line: data.line } : null;
+  }
+
+  private async syncToSource(page: number, x: number, y: number): Promise<void> {
+    const at = await this.sourceAt(page, x, y);
+    if (at) this.opts.onJumpToSource(at.file, at.line);
   }
 
   private renderTabs(): void {

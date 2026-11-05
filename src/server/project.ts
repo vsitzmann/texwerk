@@ -796,7 +796,17 @@ export class Project {
       this.compileQueued = by;
       return this.compiling;
     }
-    this.compiling = this.runCompile(by).finally(() => {
+    // A compile that throws (the folder moved or deleted under it, a full disk)
+    // must not reject unhandled: that would take the whole server down.
+    this.compiling = this.runCompile(by).catch((err: Error) => {
+      if (this.closed) return;
+      console.error(`[texwerk] compile of ${this.name} failed:`, err);
+      this.compile = {
+        ...this.compile, state: 'done', ok: false, finishedAt: Date.now(),
+        issues: [{ level: 'error', file: '', line: null, message: `The compile failed: ${err.message}` }],
+      };
+      this.broadcastEvent({ t: 'compile', compile: this.compile });
+    }).finally(() => {
       this.compiling = null;
       if (this.compileQueued) {
         const next = this.compileQueued;

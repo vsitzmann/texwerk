@@ -184,9 +184,15 @@ export function menu(anchor: HTMLElement, items: Node[]): () => void {
   const width = node.offsetWidth;
   node.style.top = `${rect.bottom + 2}px`;
   node.style.left = `${Math.max(4, Math.min(rect.left, window.innerWidth - width - 4))}px`;
-  const close = () => { node.remove(); document.removeEventListener('mousedown', outside, true); };
+  const close = () => {
+    node.remove();
+    document.removeEventListener('mousedown', outside, true);
+    document.removeEventListener('keydown', onKey, true);
+  };
   const outside = (e: MouseEvent) => { if (!node.contains(e.target as Node) && e.target !== anchor) close(); };
+  const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && node.isConnected) { e.stopPropagation(); close(); } };
   setTimeout(() => document.addEventListener('mousedown', outside, true));
+  document.addEventListener('keydown', onKey, true);
   node.addEventListener('click', (e) => { if ((e.target as HTMLElement).closest('button')) close(); });
   return close;
 }

@@ -875,4 +875,5 @@ button.busy { opacity: .75; cursor: progress; }
 /* Spelling and grammar (spellcheck.ts). */
 .cm-spell-error { text-decoration: underline wavy var(--danger); text-decoration-thickness: 1px; text-underline-offset: 3px; text-decoration-skip-ink: none; }
 .cm-spell-grammar { text-decoration: underline wavy var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; text-decoration-skip-ink: none; }
+.menu .menu-head.figure-name { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: none; letter-spacing: 0; }
 .menu .menu-head.spell-message { text-transform: none; letter-spacing: 0; max-width: 320px; white-space: normal; }

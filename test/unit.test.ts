@@ -8,6 +8,7 @@ import * as Y from 'yjs';
 import { cleanPath, cleanProjectName, isBuildArtifact, isEditorTempFile, isTextFile } from '../src/shared/files.ts';
 import { applyEditsToYText, editsBetween, setYText } from '../src/shared/textDiff.ts';
 import { parseLog } from '../src/server/compile.ts';
+import { findInclude, graphicsPaths, includesOnLine, resolveGraphic } from '../src/shared/figures.ts';
 import { formatMegabytes, pdfSizeLevel } from '../src/shared/protocol.ts';
 import { commitAll, ensureRepo, labels } from '../src/server/git.ts';
 import { History } from '../src/server/history.ts';
@@ -631,4 +632,40 @@ test('Enter picks a completion typed out in full, unless picking it would add no
   assert.equal(enterIsNewline({ label: 'item', apply: 'item' }, 'item'), true);
   assert.equal(enterIsNewline({ label: 'sitzmann2019srn', apply: 'sitzmann2019srn' }, 'sitzmann2019srn'), true);
   assert.equal(enterIsNewline({ label: 'sec:intro' }, 'sec:intro'), true);
+});
+
+test('figure double-click: the \\includegraphics behind a figure, and the file it shows', () => {
+  assert.deepEqual(includesOnLine('  \\includegraphics[width=0.3\\linewidth, trim={1 2 3 4}]{c}\\includegraphics*{d.pdf} % \\includegraphics{x}'), ['c', 'd.pdf']);
+  assert.deepEqual(includesOnLine('% \\includegraphics{x}'), []);
+  assert.deepEqual(includesOnLine('100\\% \\includegraphics{y}'), ['y']);
+  const tex = [
+    '\\begin{figure}[h]',                                   // 1
+    '  \\includegraphics{b.pdf}\\hfill',                     // 2
+    '  \\includegraphics{e}',                                // 3
+    '  \\caption{Two on separate lines.}',                   // 4
+    '\\end{figure}',                                         // 5
+    '\\begin{figure}[h]',                                   // 6
+    '  \\includegraphics{c}\\includegraphics{d}',             // 7
+    '  \\caption{Two on one line.}',                         // 8
+    '\\end{figure}',                                         // 9
+    'Plain text.',                                          // 10
+  ].join('\n');
+  // SyncTeX names the include's own line.
+  assert.deepEqual(findInclude(tex, 3, 1, 2), { line: 3, name: 'e' });
+  // Two on one line: SyncTeX names the caption; left-to-right order decides.
+  assert.deepEqual(findInclude(tex, 8, 0, 2), { line: 7, name: 'c' });
+  assert.deepEqual(findInclude(tex, 8, 1, 2), { line: 7, name: 'd' });
+  assert.deepEqual(findInclude(tex, 7, 1, 2), { line: 7, name: 'd' });
+  // The caption of the first figure: its two includes, by position.
+  assert.deepEqual(findInclude(tex, 4, 0, 2), { line: 2, name: 'b.pdf' });
+  assert.equal(findInclude('Just text.\nMore.', 1, 0, 1), null);
+
+  assert.deepEqual(graphicsPaths(['\\graphicspath{{figs/}{./img}}', 'no paths']), ['figs/', './img']);
+  const files = ['main.tex', 'figs/a.pdf', 'figs/a.png', 'img/teaser.png', 'src/figures/header/header.pdf', 'b.pdf'];
+  assert.equal(resolveGraphic('a', files, ['figs/']), 'figs/a.pdf'); // .pdf before .png, like pdfLaTeX
+  assert.equal(resolveGraphic('teaser', files, ['figs/', './img']), 'img/teaser.png');
+  assert.equal(resolveGraphic('./b.pdf', files, []), 'b.pdf');
+  assert.equal(resolveGraphic('src/figures/header/header.pdf', files, []), 'src/figures/header/header.pdf');
+  assert.equal(resolveGraphic('header', files, []), 'src/figures/header/header.pdf'); // found by name
+  assert.equal(resolveGraphic('missing', files, ['figs/']), null);
 });
