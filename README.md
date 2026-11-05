@@ -175,7 +175,10 @@ must not be exposed to the open internet.
   links to the line, and the raw latexmk output and TeX log.
 - **PDF size and speed.** The menu bar shows the compiled PDF's size: green
   below 15 MB, yellow below 40 MB, red above, since every viewer downloads the
-  whole PDF after each compile. It also warns when a page is slow to draw
+  whole PDF after each compile. While it downloads, the PDF pane shows how
+  much has arrived; reopening a project whose PDF has not changed reuses the
+  browser's copy (it only checks with the server that it is still current
+  and that you still have access). It also warns when a page is slow to draw
   (1.5 s, or 150,000 drawing operations: a vector scatter plot with tens of
   thousands of points). A click lists the largest files the paper includes
   and the slow pages, with how to shrink or rasterize them.
