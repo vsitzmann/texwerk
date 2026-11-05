@@ -738,6 +738,7 @@ button.picker-row.active { border-color: var(--accent); }
 .share-add input { flex: 1; min-width: 0; }
 
 .large-files .bad { color: var(--danger); }
+.actions .dont-ask { display: flex; gap: 6px; align-items: center; margin-right: auto; color: var(--dim); cursor: pointer; }
 /* The compiled PDF's size in the menu bar: green, yellow, red as it grows. */
 .toolbar .pdf-info { display: inline-flex; gap: 8px; align-items: center; background: none; }
 .toolbar .pdf-info[hidden] { display: none; }
