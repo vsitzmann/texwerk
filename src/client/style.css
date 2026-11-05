@@ -452,6 +452,7 @@ code { color: var(--cyan); }
 @keyframes fadeout { 0%, 50% { opacity: 1; } 100% { opacity: 0; } }
 .viewer-empty { display: grid; position: absolute; inset: 0; place-items: center; padding: 24px; color: var(--muted); text-align: center; }
 .viewer-empty .big { margin-bottom: 8px; color: var(--dim); font-size: 13px; }
+.viewer-empty button { margin-top: 10px; }
 .image-view { display: grid; position: absolute; inset: 0; overflow: auto; place-items: center; padding: 16px;
   background: repeating-conic-gradient(#1c1d27 0% 25%, #16161e 0% 50%) 50% / 20px 20px; }
 .image-view img { max-width: 100%; max-height: 100%; box-shadow: 0 2px 10px rgb(0 0 0 / 50%); }

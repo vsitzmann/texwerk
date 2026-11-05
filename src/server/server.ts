@@ -451,7 +451,9 @@ export async function startServer(options: ServerOptions) {
         return;
       }
       const download = url.searchParams.has('download') ? `${base}.pdf` : undefined;
-      return sendFile(request, response, project.lastPdf, { download, noStore: true });
+      // Revalidated on every use (so access is still checked), but a reload with
+      // no new compile costs a 304 instead of the whole PDF again.
+      return sendFile(request, response, project.lastPdf, { download });
     }
 
     // ---------------------------------------------------------------- api

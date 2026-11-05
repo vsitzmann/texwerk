@@ -5,7 +5,7 @@ import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist';
 import { extensionOf, IMAGE_EXTENSIONS } from '@shared/files.ts';
-import type { CompileIssue, CompileSummary } from '@shared/protocol.ts';
+import { formatMegabytes, type CompileIssue, type CompileSummary } from '@shared/protocol.ts';
 import { h, withName } from './ui.ts';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
@@ -304,24 +304,31 @@ class PdfView {
     }, { passive: false });
   }
 
-  async load(url: string): Promise<void> {
+  /** Show the PDF at `url`; false if it could not be loaded or a newer load replaced it. */
+  async load(url: string, onProgress?: (loaded: number, total: number) => void): Promise<boolean> {
     const token = ++this.loadToken;
     const task = pdfjs.getDocument({ url });
-    let doc: PDFDocumentProxy;
-    try { doc = await task.promise; } catch { return; }
-    if (token !== this.loadToken) { void task.destroy(); return; }
+    if (onProgress) task.onProgress = ({ loaded, total }: { loaded: number; total: number }) => onProgress(loaded, total);
     const pages: typeof this.pages = [];
-    for (let i = 1; i <= doc.numPages; i++) {
-      const page = await doc.getPage(i);
-      const vp = page.getViewport({ scale: 1 });
-      const el = h('div', { class: 'pdf-page', 'data-index': String(i - 1) }) as HTMLDivElement;
-      el.addEventListener('dblclick', (e) => {
-        const rect = el.getBoundingClientRect();
-        this.onDoubleClick?.(i, (e.clientX - rect.left) / this.scale, (e.clientY - rect.top) / this.scale, e.clientX, e.clientY);
-      });
-      pages.push({ el, page, rendered: 0, width: vp.width, height: vp.height });
+    let doc: PDFDocumentProxy;
+    try {
+      doc = await task.promise;
+      if (token !== this.loadToken) { void task.destroy(); return false; }
+      for (let i = 1; i <= doc.numPages; i++) {
+        const page = await doc.getPage(i);
+        const vp = page.getViewport({ scale: 1 });
+        const el = h('div', { class: 'pdf-page', 'data-index': String(i - 1) }) as HTMLDivElement;
+        el.addEventListener('dblclick', (e) => {
+          const rect = el.getBoundingClientRect();
+          this.onDoubleClick?.(i, (e.clientX - rect.left) / this.scale, (e.clientY - rect.top) / this.scale, e.clientX, e.clientY);
+        });
+        pages.push({ el, page, rendered: 0, width: vp.width, height: vp.height });
+      }
+    } catch {
+      void task.destroy();
+      return false;
     }
-    if (token !== this.loadToken) { void task.destroy(); return; }
+    if (token !== this.loadToken) { void task.destroy(); return false; }
     // Keep the reader's place: same relative scroll position in the new PDF.
     const ratioY = this.scroll.scrollHeight > 0 ? this.scroll.scrollTop / this.scroll.scrollHeight : 0;
     const ratioX = this.scroll.scrollLeft;
@@ -336,7 +343,7 @@ class PdfView {
     // Render what will be visible before swapping, so a recompile does not flash white.
     const firstVisible = Math.floor(ratioY * pages.length);
     await Promise.all([firstVisible, firstVisible + 1].filter((i) => i < pages.length).map((i) => this.renderPage(i)));
-    if (token !== this.loadToken) return;
+    if (token !== this.loadToken) return false;
     this.pagesEl.replaceChildren(...pages.map((p) => p.el));
     this.scroll.scrollTop = ratioY * this.scroll.scrollHeight;
     this.scroll.scrollLeft = ratioX;
@@ -344,6 +351,7 @@ class PdfView {
     void old?.destroy();
     this.drawPins();
     this.onZoom?.();
+    return true;
   }
 
   clear(): void {
@@ -496,7 +504,10 @@ export class Viewer {
   private chatPanel: HTMLElement | null = null;
   private chatUnread = 0;
   private chatMentioned = false;
-  private loadingPdf = false;
+  /** The PDF being downloaded, and how far along it is. */
+  private pdfLoad: { loaded: number; total: number } | null = null;
+  /** The newest PDF could not be loaded, and no older one is showing. */
+  private pdfFailed = false;
 
   constructor(opts: ViewerOptions) {
     this.opts = opts;
@@ -524,13 +535,28 @@ export class Viewer {
     if (log !== undefined) this.log = log;
     if (summary.state === 'done' && summary.hasPdf && summary.rev !== this.lastPdfRev) {
       this.lastPdfRev = summary.rev;
-      this.loadingPdf = true;
+      const load = { loaded: 0, total: summary.pdfBytes ?? 0 };
+      this.pdfLoad = load;
+      this.pdfFailed = false;
       if (this.slowPages.length) {
         this.slowPages = [];
         this.opts.onSlowPages?.([]);
       }
-      void this.pdf.load(withName(`/pdf/${encodeURIComponent(this.opts.project())}/output.pdf?rev=${summary.rev}`))
-        .finally(() => { this.loadingPdf = false; this.render(); this.opts.onPdfLoaded(); });
+      // Over a slow link the download is most of the wait: say how far it is.
+      const onProgress = (loaded: number, total: number) => {
+        const shown = formatMegabytes(load.loaded);
+        load.loaded = loaded;
+        if (total) load.total = total;
+        if (this.pdfLoad === load && formatMegabytes(loaded) !== shown) this.render();
+      };
+      void this.pdf.load(withName(`/pdf/${encodeURIComponent(this.opts.project())}/output.pdf?rev=${summary.rev}`), onProgress)
+        .then((shown) => {
+          if (this.pdfLoad !== load) return;
+          this.pdfLoad = null;
+          this.pdfFailed = !shown && !this.pdf.loaded;
+          this.render();
+          this.opts.onPdfLoaded();
+        });
     }
     this.render();
   }
@@ -640,7 +666,10 @@ export class Viewer {
     }
     const tools = h('div', { class: 'tools' });
     // A large PDF takes a moment to arrive; until then the old one stays up.
-    if (this.loadingPdf) tools.append(h('span', { class: 'loading', title: 'The new PDF is being downloaded and rendered' }, 'loading new PDF…'));
+    // (With no PDF up yet, the PDF tab itself says so.)
+    if (this.pdfLoad && (this.pdf.loaded || this.tab !== 'pdf')) {
+      tools.append(h('span', { class: 'loading', title: 'The new PDF is being downloaded and rendered' }, `loading new PDF… ${this.loadProgress()}`.trim()));
+    }
     if (this.tab === 'pdf' && this.pdf.loaded) {
       tools.append(
         h('button', { class: 'ghost icon', title: 'Go to the cursor position in the PDF (Ctrl+Alt+→)', onclick: () => this.opts.onSyncFromCursor() }, '⇢'),
@@ -662,10 +691,7 @@ export class Viewer {
     if (this.tab === 'pdf') {
       if (this.pdf.loaded) content.push(this.pdf.scroll);
       else {
-        const c = this.compile;
-        this.empty.replaceChildren(h('div', {},
-          h('div', { class: 'big' }, c?.state === 'running' ? 'Compiling…' : 'No PDF yet'),
-          h('div', {}, c?.state === 'running' ? '' : c && c.rev > 0 ? 'The last compile produced no PDF — see the Log tab.' : 'Press Recompile (Ctrl+S).')));
+        this.empty.replaceChildren(this.emptyMessage());
         content.push(this.empty);
       }
     } else if (this.tab === 'log') {
@@ -682,6 +708,33 @@ export class Viewer {
     // Keep the PDF element alive (and scrolled) while other tabs show.
     for (const child of [...this.body.children]) if (!content.includes(child)) child.remove();
     for (const node of content) if (node.parentNode !== this.body) this.body.append(node);
+  }
+
+  /** "3.1 of 8.6 MB" while the PDF downloads. */
+  private loadProgress(): string {
+    const l = this.pdfLoad;
+    if (!l || !l.loaded) return '';
+    return l.total ? `${formatMegabytes(l.loaded)} of ${formatMegabytes(l.total)}` : formatMegabytes(l.loaded);
+  }
+
+  private emptyMessage(): HTMLElement {
+    const c = this.compile;
+    if (this.pdfLoad) {
+      return h('div', {},
+        h('div', { class: 'big' }, 'Loading the PDF…'),
+        h('div', {}, this.loadProgress() || 'Starting the download.'));
+    }
+    if (this.pdfFailed) {
+      const retry = h('button', { class: 'ghost' }, 'Try again');
+      retry.addEventListener('click', () => { this.lastPdfRev = -1; if (this.compile) this.setCompile(this.compile); });
+      return h('div', {},
+        h('div', { class: 'big' }, 'The PDF could not be loaded'),
+        h('div', {}, 'The connection may have dropped.'), retry);
+    }
+    if (c?.state === 'running') return h('div', {}, h('div', { class: 'big' }, 'Compiling…'));
+    return h('div', {},
+      h('div', { class: 'big' }, 'No PDF yet'),
+      h('div', {}, c && c.rev > 0 ? 'The last compile produced no PDF — see the Log tab.' : 'Press Recompile (Ctrl+S).'));
   }
 
   private renderLog(): void {
