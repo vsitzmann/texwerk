@@ -2,11 +2,11 @@ import * as Y from 'yjs';
 import { Awareness } from 'y-protocols/awareness';
 import { colorFor } from '@shared/files.ts';
 import { Provider } from '@shared/provider.ts';
-import type { BinInfo, CompileSummary, Identity, ProjectSettings, ServerEvent } from '@shared/protocol.ts';
+import { formatMegabytes, pdfSizeLevel, PDF_SIZE_BAD, PDF_SIZE_WARN, type BinInfo, type CompileSummary, type Identity, type ProjectSettings, type ServerEvent } from '@shared/protocol.ts';
 import { CodeEditor } from './codeEditor.ts';
 import { FileTree } from './tree.ts';
 import { HistoryView } from './historyView.ts';
-import { Viewer, type PdfPin } from './viewer.ts';
+import { Viewer, type PdfPin, type SlowPage } from './viewer.ts';
 import { Comments } from './comments.ts';
 import { Chat } from './chat.ts';
 import { authorRuns } from '@shared/provenance.ts';
@@ -56,6 +56,8 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
   });
   const compileBtn = h('button', { class: 'primary', title: 'Compile (Ctrl+S / Ctrl+Enter)' }, '▶ Recompile');
   const compileMore = h('button', { class: 'primary', title: 'Compile settings' }, '▾');
+  // The compiled PDF's size, and a warning when pages are slow to draw.
+  const pdfInfoBtn = h('button', { class: 'pdf-info', hidden: true });
   const historyBtn = h('button', { title: 'Full edit history, labelled versions' }, 'History');
   const labelBtn = h('button', { title: 'Save a named version (a git commit)' }, 'Label version');
   const gitBtn = h('button', { title: 'Git remote, push and pull' }, 'Git…');
@@ -76,6 +78,7 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
     titleEl,
     roBadge,
     h('span', { class: 'group' }, compileBtn, compileMore),
+    pdfInfoBtn,
     h('span', { class: 'spacer' }),
     presenceEl,
     h('span', { class: 'sep' }),
@@ -171,6 +174,58 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
     onPinClick: (id, rect) => comments.openThread(id, rect),
     onPdfLoaded: () => schedulePins(0),
     onTabChange: (tab) => { if (tab === 'chat') chat.shown(); },
+    onSlowPages: (pages) => { slowPages = pages; renderPdfInfo(); },
+  });
+
+  // ------------------------------------------------------------ PDF weight
+  let slowPages: SlowPage[] = [];
+  const pageList = (pages: SlowPage[]) => {
+    const numbers = pages.map((p) => p.page);
+    return `page${numbers.length === 1 ? '' : 's'} ${numbers.length > 3 ? `${numbers.slice(0, 3).join(', ')}…` : numbers.join(', ')}`;
+  };
+
+  function renderPdfInfo(): void {
+    const bytes = compile?.hasPdf ? compile.pdfBytes : undefined;
+    pdfInfoBtn.hidden = bytes === undefined && !slowPages.length;
+    if (pdfInfoBtn.hidden) return;
+    const level = bytes === undefined ? 'ok' : pdfSizeLevel(bytes);
+    pdfInfoBtn.className = `pdf-info ${slowPages.length ? 'bad' : level}`;
+    pdfInfoBtn.replaceChildren(
+      bytes !== undefined ? h('span', { class: `size ${level}` }, formatMegabytes(bytes)) : '',
+      slowPages.length ? h('span', { class: 'slow' }, `⚠ slow ${pageList(slowPages)}`) : '');
+    pdfInfoBtn.title = [
+      bytes !== undefined ? `The compiled PDF is ${formatMegabytes(bytes)}. Everyone viewing the project downloads all of it after every compile.` : '',
+      slowPages.length ? `Some pages take long to draw: ${pageList(slowPages)}.` : '',
+      'Click for details.',
+    ].filter(Boolean).join(' ');
+  }
+
+  pdfInfoBtn.addEventListener('click', () => {
+    const bytes = compile?.hasPdf ? compile.pdfBytes : undefined;
+    const heavy = compile?.heaviestInputs ?? [];
+    dialog((close) => [
+      h('h2', {}, 'PDF size and speed'),
+      ...(bytes !== undefined ? [
+        h('p', {}, 'The compiled PDF is ', h('b', { class: `pdf-size-text ${pdfSizeLevel(bytes)}` }, formatMegabytes(bytes)), '. ',
+          'Everyone viewing the project downloads the whole PDF again after every compile, so a big PDF makes each compile feel slow, more so on a home connection. ',
+          `The size shows green below ${PDF_SIZE_WARN / 1e6} MB, yellow below ${PDF_SIZE_BAD / 1e6} MB, and red above.`),
+        ...(heavy.length && pdfSizeLevel(bytes) !== 'ok' ? [
+          h('h3', {}, 'Largest files the paper includes'),
+          h('ul', {}, ...heavy.map((f) => h('li', {}, h('code', {}, f.path), ` — ${formatMegabytes(f.bytes)}`))),
+          h('p', { class: 'muted' }, 'Figures exported at print resolution with losslessly stored images are the usual culprits. 300 dpi JPEG images are plenty for a paper: re-export them, or shrink a PDF figure with ',
+            h('code', {}, 'gs -sDEVICE=pdfwrite -dPDFSETTINGS=/printer -sColorConversionStrategy=RGB -o small.pdf big.pdf'), '.'),
+        ] : []),
+      ] : []),
+      ...(slowPages.length ? [
+        h('h3', {}, 'Slow pages'),
+        h('ul', {}, ...slowPages.map((p) => h('li', {},
+          `Page ${p.page}: ${(p.ms / 1000).toFixed(1)} s to draw here`,
+          p.ops ? `, ${p.ops.toLocaleString('en-US')} drawing operations` : '', '.'))),
+        h('p', {}, 'Usually a plot with very many vector elements, such as a scatter plot with tens of thousands of points: every viewer redraws each one. ',
+          'Rasterize the dense part (matplotlib: ', h('code', {}, 'rasterized=True'), ' on the scatter, then save the PDF with ', h('code', {}, 'dpi=300'), '), or save the figure as a PNG.'),
+      ] : []),
+      h('div', { class: 'actions' }, h('button', { class: 'primary', onclick: close }, 'OK')),
+    ]);
   });
 
   // ------------------------------------------------------------ comments
@@ -597,6 +652,7 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
   function setCompile(summary: CompileSummary): void {
     compile = summary;
     viewer.setCompile(summary);
+    renderPdfInfo();
     const running = summary.state === 'running';
     // A compile with nothing to do finishes in a tenth of a second; keep the
     // busy state up long enough to be seen, so a click visibly did something.

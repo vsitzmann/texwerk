@@ -1,7 +1,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { basename, delimiter, join, resolve } from 'node:path';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { basename, delimiter, join, relative, resolve } from 'node:path';
 import type { CompileIssue, ProjectSettings } from '../shared/protocol.ts';
 
 /**
@@ -145,6 +145,24 @@ export async function runLatexmk(projectDir: string, settings: ProjectSettings, 
     log,
     issues,
   };
+}
+
+/**
+ * How big the compiled PDF is, and the biggest project files the compile
+ * read (from latexmk's .fls record), which are usually what makes it big:
+ * figures exported at print resolution or with images stored losslessly.
+ */
+export async function pdfWeight(projectDir: string, pdf: string): Promise<{ pdfBytes: number; heaviestInputs: Array<{ path: string; bytes: number }> }> {
+  const pdfBytes = (await stat(pdf)).size;
+  const read = new Set<string>();
+  const fls = await readFile(pdf.replace(/\.pdf$/, '.fls'), 'utf8').catch(() => '');
+  for (const m of fls.matchAll(/^INPUT (.+)$/gm)) {
+    const rel = relative(projectDir, resolve(projectDir, m[1]));
+    if (!rel.startsWith('..') && !rel.startsWith('/') && !rel.startsWith('.texwerk')) read.add(rel);
+  }
+  const sized = await Promise.all([...read].map(async (path) => ({ path, bytes: (await stat(join(projectDir, path)).catch(() => null))?.size ?? 0 })));
+  const heaviestInputs = sized.filter((f) => f.bytes >= 1e6).sort((a, b) => b.bytes - a.bytes).slice(0, 5);
+  return { pdfBytes, heaviestInputs };
 }
 
 /** Pull errors, warnings and bad boxes out of a TeX log. */

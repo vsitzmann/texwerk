@@ -8,6 +8,7 @@ import * as Y from 'yjs';
 import { cleanPath, cleanProjectName, isBuildArtifact, isEditorTempFile, isTextFile } from '../src/shared/files.ts';
 import { applyEditsToYText, editsBetween, setYText } from '../src/shared/textDiff.ts';
 import { parseLog } from '../src/server/compile.ts';
+import { formatMegabytes, pdfSizeLevel } from '../src/shared/protocol.ts';
 import { commitAll, ensureRepo, labels } from '../src/server/git.ts';
 import { History } from '../src/server/history.ts';
 import { readZip, writeZip } from '../src/server/zip.ts';
@@ -157,6 +158,46 @@ test('labels are git commits that point back into the history', async () => {
     const { git } = await import('../src/server/git.ts');
     const tracked = (await git(dir, ['ls-files'])).output.split('\n');
     assert.deepEqual(tracked, ['main.tex']);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('PDF size: green below 15 MB, yellow below 40 MB, red above; never rounded up onto a threshold', () => {
+  assert.equal(pdfSizeLevel(2e6), 'ok');
+  assert.equal(pdfSizeLevel(14_999_999), 'ok');
+  assert.equal(pdfSizeLevel(15e6), 'warn');
+  assert.equal(pdfSizeLevel(39_999_999), 'warn');
+  assert.equal(pdfSizeLevel(77_222_791), 'bad');
+  assert.equal(formatMegabytes(14_999_999), '14.9 MB');
+  assert.equal(formatMegabytes(77_222_791), '77.2 MB');
+  assert.equal(formatMegabytes(668_761), '668 kB');
+});
+
+test('a blanket *.pdf in .gitignore keeps out compiled PDFs, not figures', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'texwerk-git-'));
+  const { mkdir } = await import('node:fs/promises');
+  try {
+    await ensureRepo(dir);
+    await mkdir(join(dir, 'figures', 'raw'), { recursive: true });
+    await writeFile(join(dir, '.gitignore'), '*.pdf\nfigures/raw/\nrebuttal-draft.pdf\n');
+    await writeFile(join(dir, 'main.tex'), '\\documentclass{article}');
+    await writeFile(join(dir, 'main.pdf'), 'compiled paper');
+    await writeFile(join(dir, 'figures', 'plot.pdf'), 'figure');
+    // A snippet that includes its figure does not compile to it.
+    await writeFile(join(dir, 'figures', 'header.tex'), '\\includegraphics{figures/header.pdf}');
+    await writeFile(join(dir, 'figures', 'header.pdf'), 'figure');
+    await writeFile(join(dir, 'figures', 'Teaser.PDF'), 'figure');
+    await writeFile(join(dir, 'figures', 'raw', 'dump.pdf'), 'kept out by a folder rule');
+    await writeFile(join(dir, 'rebuttal-draft.pdf'), 'kept out by name');
+    const { git, status } = await import('../src/server/git.ts');
+    assert.ok((await status(dir)).dirty);
+    const r = await commitAll(dir, 'Figures', 'Alice', 'alice@example.com', 1);
+    assert.ok(r.ok, r.output);
+    const tracked = (await git(dir, ['ls-files'])).output.split('\n').sort();
+    assert.deepEqual(tracked, ['.gitignore', 'figures/Teaser.PDF', 'figures/header.pdf', 'figures/header.tex', 'figures/plot.pdf', 'main.tex']);
+    // Once committed, a figure is tracked like any file: nothing left to label.
+    assert.equal((await status(dir)).dirty, false);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
