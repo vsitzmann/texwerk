@@ -203,6 +203,32 @@ test('a blanket *.pdf in .gitignore keeps out compiled PDFs, not figures', async
   }
 });
 
+test('large files about to be committed are listed, largest first, until they are committed', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'texwerk-git-'));
+  const { mkdir } = await import('node:fs/promises');
+  try {
+    const { largeFilesToCommit } = await import('../src/server/git.ts');
+    await ensureRepo(dir);
+    await mkdir(join(dir, 'figures'), { recursive: true });
+    await writeFile(join(dir, '.gitignore'), '*.pdf\n');
+    await writeFile(join(dir, 'main.tex'), '\\documentclass{article}');
+    await writeFile(join(dir, 'figures', 'small.png'), Buffer.alloc(1000));
+    await writeFile(join(dir, 'figures', 'big.png'), Buffer.alloc(12e6));
+    await writeFile(join(dir, 'figures', 'huge.pdf'), Buffer.alloc(30e6)); // hidden by *.pdf, committed anyway
+    assert.deepEqual(await largeFilesToCommit(dir), [
+      { path: 'figures/huge.pdf', bytes: 30e6 },
+      { path: 'figures/big.png', bytes: 12e6 },
+    ]);
+    assert.ok((await commitAll(dir, 'Figures', 'Alice', 'alice@example.com', 1)).ok);
+    assert.deepEqual(await largeFilesToCommit(dir), []);
+    // A changed large file is committed again, in full.
+    await writeFile(join(dir, 'figures', 'big.png'), Buffer.alloc(12e6, 1));
+    assert.deepEqual((await largeFilesToCommit(dir)).map((f) => f.path), ['figures/big.png']);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('deploy key: one per project, used for its remote, and a first pull adopts the remote', async () => {
   const { ensureDeployKey, readDeployKey, pull, push, git: run } = await import('../src/server/git.ts');
   const base = await mkdtemp(join(tmpdir(), 'texwerk-deploy-'));

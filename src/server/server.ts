@@ -934,14 +934,25 @@ export async function startServer(options: ServerOptions) {
       return json(response, 200, { ok: true });
     }
 
+    // A label (and a pull, which first commits unlabelled work) asks before
+    // committing large files: 409 with the list, and `allowLarge` to go ahead.
+    const largeFilesRefusal = async (allowLarge: unknown): Promise<boolean> => {
+      if (allowLarge === true) return false;
+      const largeFiles = await gitOps.largeFilesToCommit(project.dir);
+      if (!largeFiles.length) return false;
+      json(response, 409, { error: `${largeFiles.length} large file${largeFiles.length === 1 ? '' : 's'} would be committed`, largeFiles });
+      return true;
+    };
+
     if (path === '/api/label' && method === 'POST') {
-      const body = await readJson<{ message: string }>(request);
+      const body = await readJson<{ message: string; allowLarge?: boolean }>(request);
       const message = String(body.message ?? '').trim().slice(0, 200);
       if (!message) throw new HttpError(400, 'a label needs a name');
       await project.persistAll();
       project.saveComments();
       project.saveChat();
       await project.history.flush(true);
+      if (await largeFilesRefusal(body.allowLarge)) return;
       const r = await gitOps.commitAll(project.dir, message, identity.name, identity.login, project.history.lastId());
       project.broadcastEvent({ t: 'git' });
       project.broadcastEvent({ t: 'history' });
@@ -993,8 +1004,10 @@ export async function startServer(options: ServerOptions) {
     }
 
     if (path === '/api/git/pull' && method === 'POST') {
+      const body = await readJson<{ allowLarge?: boolean }>(request);
       await project.persistAll();
       await project.history.flush(true);
+      if (await largeFilesRefusal(body.allowLarge)) return;
       const r = await gitOps.pull(project.dir, identity.name, identity.login);
       await project.reconcileAll(`${who} (git pull)`);
       await project.loadComments();

@@ -151,6 +151,11 @@ must not be exposed to the open internet.
   (common in LaTeX templates) keeps out only compiled PDFs (`main.pdf` next
   to a `main.tex` with `\documentclass`): figure PDFs are committed anyway, so
   a clone compiles. More specific rules (a named file, a folder) are obeyed.
+  Before a label (or a pull, which first commits unlabelled work) commits a
+  file of 10 MB or more, a dialog lists the large files and asks to
+  **Cancel** or **Proceed anyway**: git keeps them in the history for good.
+  **Don't ask again** stops asking for that project in that browser; Git…
+  turns it back on.
 - **Files.** Overleaf-style file tree: drag and drop files or whole folders
   from the desktop (onto the tree, a folder, or anywhere in the window), move
   files by dragging, rename, delete (restorable from history), set the main

@@ -37,6 +37,17 @@ export function withName(url: string): string {
   return u.pathname + u.search;
 }
 
+/** A refused request, with the server's whole answer for callers that need more than the message. */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly data: Record<string, unknown>;
+  constructor(status: number, message: string, data: Record<string, unknown>) {
+    super(message);
+    this.status = status;
+    this.data = data;
+  }
+}
+
 export async function api<T = unknown>(method: string, url: string, body?: unknown): Promise<T> {
   const init: RequestInit = { method, headers: {} };
   if (body instanceof Blob || body instanceof ArrayBuffer || body instanceof Uint8Array) init.body = body as BodyInit;
@@ -48,7 +59,7 @@ export async function api<T = unknown>(method: string, url: string, body?: unkno
   const text = await response.text();
   let data: unknown = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = { error: text }; }
-  if (!response.ok) throw new Error((data as { error?: string })?.error ?? `${response.status} ${response.statusText}`);
+  if (!response.ok) throw new ApiError(response.status, (data as { error?: string })?.error ?? `${response.status} ${response.statusText}`, (data ?? {}) as Record<string, unknown>);
   return data as T;
 }
 
@@ -110,7 +121,13 @@ export function dialog(content: (close: () => void) => Node[], opts: { wide?: bo
     document.removeEventListener('keydown', onKey, true);
     opts.onClose?.();
   };
-  const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+  const onKey = (e: KeyboardEvent) => {
+    // A dialog opened over another (a confirmation) takes Escape first, and alone.
+    const open = document.querySelectorAll('.backdrop');
+    if (e.key !== 'Escape' || open[open.length - 1] !== backdrop) return;
+    e.stopPropagation();
+    close();
+  };
   box.append(...content(close));
   backdrop.append(box);
   backdrop.addEventListener('mousedown', (e) => { if (e.target === backdrop) close(); });

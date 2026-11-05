@@ -1,8 +1,8 @@
 import { execFile } from 'node:child_process';
 import { chmodSync, existsSync } from 'node:fs';
-import { appendFile, mkdir, readFile, rm } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { GitLabel } from '../shared/protocol.ts';
+import { LARGE_FILE_BYTES, type GitLabel } from '../shared/protocol.ts';
 
 /**
  * Every project folder is a git repository.
@@ -167,6 +167,33 @@ export async function ignoredFigurePdfs(dir: string): Promise<string[]> {
     if (BLANKET_PDF_RULE.test(fields[k + 2])) figures.push(fields[k + 3]);
   }
   return figures;
+}
+
+/**
+ * Files of `LARGE_FILE_BYTES` or more that `commitAll` would commit now (new
+ * or changed), largest first, so a label can ask before putting them into
+ * the history for good.
+ */
+export async function largeFilesToCommit(dir: string): Promise<Array<{ path: string; bytes: number }>> {
+  await ensureRepo(dir);
+  // Version 2: no entry starts with a space, which git()'s trim would eat.
+  const listed = await git(dir, ['status', '--porcelain=v2', '-z', '--untracked-files=all']);
+  const paths: string[] = [];
+  const fields = listed.output.split('\0');
+  // Fields before the path: changed (1), renamed or copied (2), unmerged (u), untracked (?).
+  const skip: Record<string, number> = { 1: 8, 2: 9, u: 10, '?': 1 };
+  for (let i = 0; i < fields.length; i++) {
+    const n = skip[fields[i][0]];
+    if (!n) continue;
+    paths.push(fields[i].split(' ').slice(n).join(' '));
+    if (fields[i][0] === '2') i++; // followed by the old path
+  }
+  paths.push(...await ignoredFigurePdfs(dir));
+  const sized = await Promise.all([...new Set(paths)].map(async (path) => {
+    const info = await stat(join(dir, path)).catch(() => null); // deleted: nothing to commit
+    return { path, bytes: info?.isFile() ? info.size : 0 };
+  }));
+  return sized.filter((f) => f.bytes >= LARGE_FILE_BYTES).sort((a, b) => b.bytes - a.bytes);
 }
 
 function authorArgs(name: string, email: string): string[] {
