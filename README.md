@@ -225,7 +225,9 @@ shared with named people, or view-only. Its permissions live in
 outside the project's files, so they are never committed or mirrored.
 Everything is private by default: a project without that file (say, one copied
 into the projects folder by hand), or with a broken one, is visible only to the
-administrator until they share it or make it public. Without
+administrator until they share it or make it public. To check what is public,
+switch the projects browser from **Private** (the default) to **Public only**:
+it lists every project anyone on the server can open, from every folder. Without
 `--access`, people type a name, used for carets and the history, and everyone
 who can reach the server can open and edit every project. Either way there are
 no passwords: this is for trusted networks. Never expose it with
