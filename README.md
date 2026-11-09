@@ -222,9 +222,10 @@ With `--access`, identity comes from the `Tailscale-User-Login` headers that
 `tailscale serve` adds, trusted only on loopback, and a project can be private,
 shared with named people, or view-only. Its permissions live in
 `.texwerk/access.json` (owner, public or private, and `edit`/`view` grants),
-outside the project's files, so they are never committed or mirrored. A
-project without that file is public and editable by everyone, so turning
-`--access` on changes nothing until somebody restricts a project. Without
+outside the project's files, so they are never committed or mirrored.
+Everything is private by default: a project without that file (say, one copied
+into the projects folder by hand), or with a broken one, is visible only to the
+administrator until they share it or make it public. Without
 `--access`, people type a name, used for carets and the history, and everyone
 who can reach the server can open and edit every project. Either way there are
 no passwords: this is for trusted networks. Never expose it with

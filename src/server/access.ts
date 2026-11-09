@@ -9,10 +9,11 @@ import type { Identity } from '../shared/protocol.ts';
  *
  * A project's permissions live in `.texwerk/access.json` inside the project —
  * never in the project's own files, so they are not committed to git, not
- * mirrored to anyone's machine, and not editable through the document. A
- * project without the sidecar is public and admin-owned (and editable by
- * everyone), so turning access control on over existing projects changes
- * nothing until somebody restricts one.
+ * mirrored to anyone's machine, and not editable through the document.
+ * Everything is private by default: a project without the sidecar (one
+ * written straight to disk, not created through the server), with a corrupt
+ * one, or with one that does not say `"visibility": "public"` is private to
+ * the admin. Only an explicit public setting opens a project to everyone.
  *
  * Every grant carries a role — `edit` or `view`. Roles only add up: a
  * person's role is the most permissive of their explicit share and what the
@@ -75,21 +76,21 @@ function sidecar(projectDir: string): string {
   return join(projectDir, '.texwerk', 'access.json');
 }
 
-/** A missing or unreadable sidecar is public, admin-owned, editable. */
+/** A missing or unreadable sidecar is private to the admin. */
 export async function readAccess(projectDir: string, config: AccessConfig): Promise<ProjectAccess> {
-  const fallback: ProjectAccess = { owner: normalizeLogin(config.admin), visibility: 'public', sharedWith: [], publicRole: 'edit' };
+  const fallback: ProjectAccess = { owner: normalizeLogin(config.admin), visibility: 'private', sharedWith: [], publicRole: 'view' };
   let raw: string;
   try { raw = await readFile(sidecar(projectDir), 'utf8'); } catch { return fallback; }
   try {
     const parsed = JSON.parse(raw) as Partial<ProjectAccess>;
     return {
       owner: typeof parsed.owner === 'string' && parsed.owner.trim() ? normalizeLogin(parsed.owner) : fallback.owner,
-      visibility: parsed.visibility === 'private' ? 'private' : 'public',
+      visibility: parsed.visibility === 'public' ? 'public' : 'private',
       sharedWith: normalizeShares(parsed.sharedWith),
-      publicRole: asRole(parsed.publicRole, 'edit'),
+      publicRole: asRole(parsed.publicRole, 'view'),
     };
   } catch {
-    // A corrupt sidecar must not lock the admin out; treat it as absent.
+    // A corrupt sidecar must neither open the project nor lock the admin out.
     return fallback;
   }
 }

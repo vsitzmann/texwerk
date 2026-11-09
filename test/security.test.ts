@@ -70,6 +70,70 @@ async function server(t: { after: (fn: () => Promise<void>) => void }) {
   return { root, projects, origin: `http://127.0.0.1:${port}` };
 }
 
+test('with --access, everything is private by default', async (t) => {
+  // Projects written straight to disk (the way an agent drafts a reference
+  // letter) carry no access file. Nobody but the admin may see them, nor ones
+  // whose access file is broken or does not say "public".
+  const root = await mkdtemp(join(tmpdir(), 'texwerk-private-'));
+  const projects = join(root, 'projects');
+  const project = async (id: string, sidecar?: string) => {
+    await mkdir(join(projects, id, '.texwerk'), { recursive: true });
+    await writeFile(join(projects, id, 'main.tex'), `SECRET ${id}\n`);
+    if (sidecar !== undefined) await writeFile(join(projects, id, '.texwerk', 'access.json'), sidecar);
+  };
+  await mkdir(join(projects, 'Reference letters', 'Visa'), { recursive: true });
+  await writeFile(join(projects, 'Reference letters', '.texwerk-folder.json'), '{"owner":"admin@example.com"}');
+  await writeFile(join(projects, 'Reference letters', 'Visa', '.texwerk-folder.json'), '{"owner":"admin@example.com"}');
+  await project('Reference letters/Visa/O-1 letter');
+  await project('Draft');
+  await project('Broken', '{"owner": "admin@exam');
+  await project('No visibility', '{"owner":"admin@example.com","sharedWith":[]}');
+  await project('Shared', '{"owner":"admin@example.com","visibility":"private","sharedWith":[{"login":"ann@example.com","role":"view"}]}');
+  await project('Open', '{"owner":"admin@example.com","visibility":"public"}');
+  const port = 20000 + Math.floor(Math.random() * 20000);
+  const s = await startServer({ rootDir: projects, clientDir: null, bridgeFile: null, port, host: '127.0.0.1', access: { admin: 'admin@example.com' } });
+  t.after(async () => { await s.close(); await rm(root, { recursive: true, force: true }); });
+  const origin = `http://127.0.0.1:${port}`;
+  // On loopback the server trusts tailscale serve's identity header; none means the admin.
+  const as = (login: string | null) => (login ? { 'tailscale-user-login': login } : {}) as Record<string, string>;
+  const catalog = async (login: string | null) => {
+    const res = await fetch(`${origin}/api/projects`, { headers: as(login) });
+    assert.equal(res.status, 200);
+    const body = await res.json() as { projects: Array<{ id: string }>; folders: Array<{ path: string }> };
+    return { projects: body.projects.map((p) => p.id).sort(), folders: body.folders.map((f) => f.path).sort() };
+  };
+
+  const hidden = ['Reference letters/Visa/O-1 letter', 'Draft', 'Broken', 'No visibility', 'Shared'];
+  assert.deepEqual(await catalog('mallory@example.com'), { projects: ['Open'], folders: [] }, 'a stranger sees only the public project');
+  assert.deepEqual(await catalog('ann@example.com'), { projects: ['Open', 'Shared'], folders: [] }, 'ann sees what was shared with her');
+  assert.deepEqual((await catalog(null)).projects, [...hidden, 'Open'].sort(), 'the admin sees everything');
+
+  // A project is the same id whether a stranger lists it or guesses it.
+  const create = await fetch(`${origin}/api/projects`, { method: 'POST', headers: as('ann@example.com'), body: JSON.stringify({ name: 'Anns paper' }) });
+  assert.equal(create.status, 200);
+  for (const id of [...hidden, 'Anns paper']) {
+    const q = encodeURIComponent(id);
+    for (const url of [`/raw/${q}/main.tex`, `/pdf/${q}/main.pdf`, `/api/zip?project=${q}`, `/api/history?project=${q}`,
+      `/api/comments?project=${q}`, `/api/chat?project=${q}`, `/api/access?project=${q}`, `/api/git?project=${q}`]) {
+      const res = await fetch(`${origin}${url}`, { headers: as('mallory@example.com') });
+      const text = await res.text();
+      if (id === 'Shared' && url.startsWith('/raw/')) {
+        assert.equal((await fetch(`${origin}${url}`, { headers: as('ann@example.com') })).status, 200, 'ann can read what was shared with her');
+      }
+      assert.equal(res.status, 403, `${url} as a stranger`);
+      assert.doesNotMatch(text, /SECRET/);
+    }
+    const ws = new WebSocket(`${origin.replace('http', 'ws')}/ws?project=${q}`, { headers: as('mallory@example.com') });
+    const received: string[] = [];
+    ws.on('message', (data) => received.push(Buffer.from(data as ArrayBuffer).toString('latin1')));
+    const code = await new Promise<number>((done) => { ws.once('close', (c) => done(c)); ws.once('error', () => done(-1)); });
+    assert.equal(code, 4403, `${id} over the socket`);
+    assert.ok(!received.some((m) => m.includes('SECRET')), `${id} leaked over the socket`);
+  }
+  assert.equal((await fetch(`${origin}/raw/Open/main.tex`, { headers: as('mallory@example.com') })).status, 200, 'a public project stays open');
+  assert.equal((await fetch(`${origin}/raw/${encodeURIComponent('Reference letters/Visa/O-1 letter')}/main.tex`)).status, 200, 'the admin can read the letter');
+});
+
 test('a collaborator cannot write outside the project through the document', async (t) => {
   const { root, projects, origin } = await server(t);
   const ws = new WebSocket(`${origin.replace('http', 'ws')}/ws?project=Paper&name=Mallory`);
