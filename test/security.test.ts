@@ -107,6 +107,9 @@ test('with --access, everything is private by default', async (t) => {
   assert.deepEqual(await catalog('mallory@example.com'), { projects: ['Open'], folders: [] }, 'a stranger sees only the public project');
   assert.deepEqual(await catalog('ann@example.com'), { projects: ['Open', 'Shared'], folders: [] }, 'ann sees what was shared with her');
   assert.deepEqual((await catalog(null)).projects, [...hidden, 'Open'].sort(), 'the admin sees everything');
+  // The browser's "Public only" switch lists exactly what the catalog marks public.
+  const marked = (await (await fetch(`${origin}/api/projects`)).json() as { projects: Array<{ id: string; visibility: string }> }).projects;
+  assert.deepEqual(marked.filter((p) => p.visibility === 'public').map((p) => p.id), ['Open']);
 
   // A project is the same id whether a stranger lists it or guesses it.
   const create = await fetch(`${origin}/api/projects`, { method: 'POST', headers: as('ann@example.com'), body: JSON.stringify({ name: 'Anns paper' }) });

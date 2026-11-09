@@ -6,6 +6,10 @@ import { api, confirmDialog, copyText, dialog, h, menu, prompt, toast } from './
  * column labels, a scrolling list of folders and projects, a footer of
  * actions. With access control on, projects are grouped by how you relate to
  * them and each row says who owns it and who can open it.
+ *
+ * The Private / Public only switch (access control only) is for auditing:
+ * Public only lists every project anyone on the server can open, from every
+ * folder at once. It starts on Private each time the browser opens.
  */
 
 export interface ProjectEntry {
@@ -144,10 +148,10 @@ export function showPicker(opts: { me: Me; dismissable: boolean; folder?: string
     return rowGroup(row, [rename, remove]);
   };
 
-  const projectRow = (p: ProjectEntry, folders: FolderEntry[]): HTMLElement => {
+  const projectRow = (p: ProjectEntry, folders: FolderEntry[], withFolder = false): HTMLElement => {
     const accessCell = p.role === 'view' ? 'view only'
       : p.visibility ? (p.visibility === 'public' ? (p.publicRole === 'view' ? 'public · view' : 'public') : 'private') : '';
-    const row = pickerRow('button', p.name, [
+    const row = pickerRow('button', withFolder && p.folder ? `${p.folder} / ${p.name}` : p.name, [
       `${p.files} file${p.files === 1 ? '' : 's'}`,
       editedAgo(p.editedAt),
       createdOn(p.createdAt),
@@ -189,9 +193,42 @@ export function showPicker(opts: { me: Me; dismissable: boolean; folder?: string
     if (folder && !folders.some((f) => f.path === folder)) trail.append(h('span', { class: 'picker-crumb-sep' }, '· no longer available'));
   };
 
+  let publicOnly = false;
+  const scopeButton = (label: string, hint: string, value: boolean) => {
+    const b = h('button', { class: 'picker-scope-button', title: hint, 'aria-pressed': String(publicOnly === value) }, label);
+    b.addEventListener('click', () => {
+      publicOnly = value;
+      for (const other of scope.children) other.setAttribute('aria-pressed', String(other === b));
+      void render();
+    });
+    return b;
+  };
+  const scope = h('div', { class: 'picker-scope', role: 'group', 'aria-label': 'Which projects to list' });
+  scope.append(
+    scopeButton('Private', 'Every project you can open, folder by folder', false),
+    scopeButton('Public only', 'Only the projects everyone on this server can open, from every folder', true));
+
+  /** Every public project on the server, wherever it is filed. */
+  const renderPublic = (data: { projects: ProjectEntry[]; folders: FolderEntry[] }) => {
+    trail.replaceChildren(h('span', { class: 'picker-crumb-sep' }, 'Public projects, from every folder'));
+    list.replaceChildren();
+    const open = data.projects.filter((p) => p.visibility === 'public');
+    if (!open.length) {
+      list.append(h('div', { class: 'picker-group' }, 'Nothing is public. Only owners and the people they shared with can open each project.'));
+      return;
+    }
+    for (const [label, role] of [['Public · anyone can edit', 'edit'], ['Public · anyone can view', 'view']] as const) {
+      const entries = open.filter((p) => (p.publicRole ?? 'edit') === role);
+      if (!entries.length) continue;
+      list.append(h('div', { class: 'picker-group' }, label));
+      for (const p of entries) list.append(projectRow(p, data.folders, true));
+    }
+  };
+
   const render = async () => {
     let data: { projects: ProjectEntry[]; folders: FolderEntry[] };
     try { data = await api('GET', '/api/projects'); } catch { list.replaceChildren(h('div', { class: 'picker-group' }, 'Could not reach the server.')); return; }
+    if (opts.me.access && publicOnly) { renderPublic(data); return; }
     renderTrail(data.folders);
     list.replaceChildren();
     const here = data.projects.filter((p) => p.folder === folder);
@@ -280,7 +317,7 @@ export function showPicker(opts: { me: Me; dismissable: boolean; folder?: string
 
   const who = opts.me.access ? h('span', { class: 'picker-who', title: opts.me.you.login }, `${opts.me.you.name}${opts.me.admin ? ' · admin' : ''}`) : '';
   box.append(
-    h('div', { class: 'picker-head' }, h('h2', {}, 'Projects on this server'), trail, who),
+    h('div', { class: 'picker-head' }, h('h2', {}, 'Projects on this server'), trail, opts.me.access ? scope : '', who),
     h('div', { class: 'picker-columns' }, rowGroup(pickerRow('div', 'Name', ['Size', 'Last edit', 'Created', 'Editing', 'Owner', 'Access']), [])),
     list,
     h('div', { class: 'picker-foot' }, progress, actions));
