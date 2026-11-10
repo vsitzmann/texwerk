@@ -147,8 +147,11 @@ export class History {
     this.entries.push(entry);
     this.lastHash.set(entry.path, entry.op === 'delete' ? null : entry.hash ?? null);
     const line = `${JSON.stringify(entry)}\n`;
-    this.writeChain = this.writeChain.then(() => appendFile(join(this.dir, 'log.jsonl'), line));
-    await this.writeChain;
+    // One failed write (the folder deleted under us) must not fail every
+    // later one, so the chain swallows it and only this caller sees it.
+    const write = this.writeChain.then(() => appendFile(join(this.dir, 'log.jsonl'), line));
+    this.writeChain = write.catch(() => {});
+    await write;
     this.onAppend?.();
     return entry;
   }

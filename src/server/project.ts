@@ -211,7 +211,7 @@ export class Project {
       for (const wake of this.chatWaiters.splice(0)) wake();
     });
     this.startWatcher();
-    this.flushTimer = setInterval(() => { void this.history.flush(); }, 1000);
+    this.flushTimer = setInterval(() => { this.history.flush().catch((err) => this.warnBackground('history', err)); }, 1000);
     this.scheduleUnload();
   }
 
@@ -512,9 +512,18 @@ export class Project {
       if (t) clearTimeout(t);
       this.watchTimers.set(rel, setTimeout(() => {
         this.watchTimers.delete(rel);
-        void this.reconcile(rel);
+        this.reconcile(rel).catch((err) => this.warnBackground(`reconcile ${rel}`, err));
       }, WATCH_DEBOUNCE_MS));
     }, skip);
+  }
+
+  /**
+   * Timers and the watcher run without a caller to report to. A failure there
+   * (the project's folder deleted on disk while it is open) is logged, not
+   * left unhandled, which would take down the whole server.
+   */
+  private warnBackground(what: string, err: unknown): void {
+    console.error(`[${this.name}] ${what} failed:`, (err as Error).message);
   }
 
   /** Fold whatever is on disk at `rel` into the document. */
