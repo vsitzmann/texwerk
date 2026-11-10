@@ -669,3 +669,28 @@ test('figure double-click: the \\includegraphics behind a figure, and the file i
   assert.equal(resolveGraphic('header', files, []), 'src/figures/header/header.pdf'); // found by name
   assert.equal(resolveGraphic('missing', files, ['figs/']), null);
 });
+
+test('deleting an open project\'s folder on disk does not crash the server', async () => {
+  const { Project } = await import('../src/server/project.ts');
+  const root = await mkdtemp(join(tmpdir(), 'texwerk-gone-'));
+  const dir = join(root, 'Paper');
+  await (await import('node:fs/promises')).mkdir(dir);
+  await writeFile(join(dir, 'main.tex'), 'Hello.\n');
+  const failures: unknown[] = [];
+  const onRejection = (err: unknown) => failures.push(err);
+  process.on('unhandledRejection', onRejection);
+  try {
+    const p = new Project('Paper', dir);
+    await p.open();
+    // Let the history settle on main.tex, so its removal is a recorded delete.
+    await new Promise((r) => setTimeout(r, 300));
+    await rm(dir, { recursive: true, force: true });
+    // Watcher debounce plus a couple of history flushes.
+    await new Promise((r) => setTimeout(r, 2500));
+    assert.deepEqual(failures.map((e) => String(e)), []);
+    await p.close().catch(() => {});
+  } finally {
+    process.off('unhandledRejection', onRejection);
+    await rm(root, { recursive: true, force: true });
+  }
+});
