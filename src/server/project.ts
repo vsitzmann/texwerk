@@ -21,6 +21,7 @@ import { authorRuns } from '../shared/provenance.ts';
 import { isMassDeletion, MASS_DELETION_WINDOW_MS } from '../shared/deletionGuard.ts';
 import { BUILD_DIR, pdfWeight, runLatexmk } from './compile.ts';
 import { snapshotPdf } from './pdfStore.ts';
+import { logTiming, serverLoad } from './timings.ts';
 import { ensureRepo } from './git.ts';
 import { hashBytes, History } from './history.ts';
 import { listTrash, moveToTrash, PROJECT_TRASH, readEntry, restoreFromTrash, type TrashMeta } from './trash.ts';
@@ -806,11 +807,14 @@ export class Project {
     if (clean) this.cleanNext = true;
     if (this.compiling) {
       this.compileQueued = by;
+      this.queuedSince ??= Date.now();
       return this.compiling;
     }
+    const requestedAt = this.queuedSince ?? Date.now();
+    this.queuedSince = null;
     // A compile that throws (the folder moved or deleted under it, a full disk)
     // must not reject unhandled: that would take the whole server down.
-    this.compiling = this.runCompile(by).catch((err: Error) => {
+    this.compiling = this.runCompile(by, requestedAt).catch((err: Error) => {
       if (this.closed) return;
       console.error(`[texwerk] compile of ${this.name} failed:`, err);
       this.compile = {
@@ -829,8 +833,13 @@ export class Project {
     return this.compiling;
   }
 
-  private async runCompile(by: string): Promise<void> {
+  /** When the compile waiting behind the running one was first asked for. */
+  private queuedSince: number | null = null;
+
+  private async runCompile(by: string, requestedAt = Date.now()): Promise<void> {
+    const began = Date.now();
     await this.persistAll();
+    const persisted = Date.now();
     if (!this.settings.mainFile) {
       this.settings.mainFile = this.guessMainFile();
       if (this.settings.mainFile) await this.saveSettings();
@@ -842,6 +851,7 @@ export class Project {
     // After a failed or PDF-less run, "nothing changed" is not an answer.
     const force = this.compile.rev > 0 && (!this.compile.ok || !this.lastPdf);
     const run = await runLatexmk(this.dir, this.settings, { force, clean });
+    const compiled = Date.now();
     if (clean && !run.pdf) this.lastPdf = null;
     if (run.pdf) this.lastPdf = run.pdf;
     this.lastOutput = run.output;
@@ -862,6 +872,13 @@ export class Project {
     };
     await writeFile(join(this.dir, BUILD_DIR, 'texwerk-compile.json'), JSON.stringify({ ...this.compile, pdf: this.lastPdf }));
     this.broadcastEvent({ t: 'compile', compile: this.compile });
+    const done = Date.now();
+    void logTiming(this.dir, {
+      kind: 'compile', rev: this.compile.rev, by, ok: run.ok, upToDate: run.upToDate, forced: run.forced || undefined,
+      waitedMs: began - requestedAt, persistMs: persisted - began, latexmkMs: compiled - persisted,
+      runs: (run.output.match(/^Run number /gm) ?? []).length, afterMs: done - compiled, totalMs: done - requestedAt,
+      pdfBytes: this.compile.pdfBytes, viewers: this.conns.size, ...serverLoad(),
+    });
   }
 
   isCompiling(): Promise<void> | null {

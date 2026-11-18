@@ -182,6 +182,8 @@ class PdfView {
   scale = 1;
   fitWidth = true;
   private loadToken = 0;
+  /** The last load that reached the screen: PDF.js reading the file and its pages, then drawing the pages in view. */
+  lastLoad: { parseMs: number; drawMs: number; pages: number } | null = null;
   onZoom: (() => void) | null = null;
   onDoubleClick: ((page: number, x: number, y: number, clientX: number, clientY: number) => void) | null = null;
   onPinClick: ((id: string, rect: DOMRect) => void) | null = null;
@@ -410,6 +412,7 @@ class PdfView {
   /** Show the PDF (its bytes, or a URL); false if it could not be loaded or a newer load replaced it. */
   async load(source: Uint8Array | string): Promise<boolean> {
     const token = ++this.loadToken;
+    const started = performance.now();
     const task = pdfjs.getDocument(typeof source === 'string' ? { url: source } : { data: source });
     const pages: typeof this.pages = [];
     let doc: PDFDocumentProxy;
@@ -443,9 +446,11 @@ class PdfView {
     if (this.fitWidth) this.scale = this.fitScale();
     this.layout();
     // Render what will be visible before swapping, so a recompile does not flash white.
+    const parsed = performance.now();
     const firstVisible = Math.floor(ratioY * pages.length);
     await Promise.all([firstVisible, firstVisible + 1].filter((i) => i < pages.length).map((i) => this.renderPage(i)));
     if (token !== this.loadToken) return false;
+    this.lastLoad = { parseMs: parsed - started, drawMs: performance.now() - parsed, pages: pages.length };
     this.pagesEl.replaceChildren(...pages.map((p) => p.el));
     this.scroll.scrollTop = ratioY * this.scroll.scrollHeight;
     this.scroll.scrollLeft = ratioX;
@@ -631,6 +636,13 @@ export class Viewer {
   private showRaw = false;
   private readonly opts: ViewerOptions;
   private lastPdfRev = -1;
+  /** This browser asked for a compile (by its user's name), for the timings log. */
+  private clicked: { name: string; at: number } | null = null;
+
+  /** Called when this user starts a compile, so its wait can be timed from the click. */
+  noteCompileClicked(name: string): void {
+    this.clicked = { name, at: performance.now() };
+  }
   /** The newest PDF downloaded, so the next compile only needs to send what changed. */
   private have: PdfBytes | null = null;
   private commentsPanel: HTMLElement | null = null;
@@ -686,7 +698,16 @@ export class Viewer {
         if (this.pdfLoad === load && formatMegabytes(loaded) !== shown) this.render();
       };
       const url = `/pdf/${encodeURIComponent(this.opts.project())}/output.pdf?rev=${summary.rev}`;
-      void fetchPdf(url, this.have, onProgress)
+      // For the timings log: who started this, and when this browser heard it was done.
+      const doneAt = performance.now();
+      const click = this.clicked && this.clicked.name === summary.by && doneAt - this.clicked.at < 5 * 60_000 ? this.clicked : null;
+      if (click) this.clicked = null;
+      const timing: Record<string, unknown> = {
+        rev: summary.rev, trigger: click ? 'my-compile' : !this.have ? 'open' : summary.by === 'auto' ? 'auto-compile' : 'other-compile',
+        compileMs: summary.finishedAt - summary.startedAt, visibility: document.visibilityState, ...connectionInfo(),
+        ...(click ? { clickToDoneMs: doneAt - click.at } : {}),
+      };
+      void fetchPdf(url, this.have, onProgress, timing)
         .then((got) => {
           if (!got || this.pdfLoad !== load) return false;
           if (got.hash) this.have = got;
@@ -701,6 +722,11 @@ export class Viewer {
           this.render();
           if (shown && this.findOpen && this.findQuery) void this.runFind(true);
           this.opts.onPdfLoaded();
+          if (shown) {
+            const now = performance.now();
+            Object.assign(timing, this.pdf.lastLoad, { doneToShownMs: now - doneAt }, click ? { clickToShownMs: now - click.at } : {});
+            void fetch(withName(`/api/timing?project=${encodeURIComponent(this.opts.project())}`), { method: 'POST', body: JSON.stringify(timing), keepalive: true }).catch(() => {});
+          }
         });
     }
     this.render();
@@ -1032,12 +1058,16 @@ interface PdfBytes { hash: string; bytes: Uint8Array }
  * rebuild the PDF the server named falls back to the whole file. Null when
  * the download failed.
  */
-async function fetchPdf(url: string, have: PdfBytes | null, onProgress: (loaded: number, total: number) => void): Promise<PdfBytes | null> {
+async function fetchPdf(url: string, have: PdfBytes | null, onProgress: (loaded: number, total: number) => void, timing: Record<string, unknown> = {}): Promise<PdfBytes | null> {
+  const started = performance.now();
   const response = await fetch(withName(`${url}&base=${have?.hash ?? ''}`));
+  timing.ttfbMs = performance.now() - started;
   if (!response.ok) return null;
   const hash = response.headers.get(PDF_HASH_HEADER) ?? '';
   const body = await readAll(response, onProgress);
-  if (response.headers.get('content-type') !== PDF_DELTA_TYPE) return { hash, bytes: body };
+  const isDelta = response.headers.get('content-type') === PDF_DELTA_TYPE;
+  Object.assign(timing, { fetchMs: performance.now() - started, bytes: body.length, mode: isDelta ? 'delta' : 'full' });
+  if (!isDelta) return { hash, bytes: body };
   try {
     if (!have) throw new Error('a delta without a base');
     const bytes = applyDelta(have.bytes, body);
@@ -1045,8 +1075,15 @@ async function fetchPdf(url: string, have: PdfBytes | null, onProgress: (loaded:
     if (digest !== null && digest !== hash) throw new Error('the delta did not rebuild the PDF');
     return { hash, bytes };
   } catch {
-    return have ? fetchPdf(url, null, onProgress) : null;
+    timing.fellBack = true;
+    return have ? fetchPdf(url, null, onProgress, timing) : null;
   }
+}
+
+/** What the browser knows of its connection (Chrome and Edge; Safari and Firefox say nothing). */
+function connectionInfo(): Record<string, unknown> {
+  const c = (navigator as Navigator & { connection?: { effectiveType?: string; downlink?: number; rtt?: number } }).connection;
+  return c ? { effectiveType: c.effectiveType, downlinkMbps: c.downlink, rttMs: c.rtt } : {};
 }
 
 async function readAll(response: Response, onProgress: (loaded: number, total: number) => void): Promise<Uint8Array> {

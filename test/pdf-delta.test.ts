@@ -6,7 +6,7 @@
 import { strict as assert } from 'node:assert';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -102,6 +102,22 @@ Version two, a little longer.
   const unknown = await fetch(pdfUrl('0'.repeat(64)));
   assert.equal(unknown.headers.get('content-type'), 'application/pdf');
   assert.equal(sha256(new Uint8Array(await unknown.arrayBuffer())), second.pdfHash);
+  // Every step is logged for working out later why a wait was long.
+  const timing = await fetch(`${origin}/api/timing?project=Paper`, { method: 'POST', body: JSON.stringify({ rev: second.rev, fetchMs: 12.5, mode: 'delta', trigger: 'my-compile', evil: 'x'.repeat(1e4), ua: 'spoofed' }) });
+  assert.equal(timing.status, 200);
+  const log = (await readFile(join(projects, 'Paper', '.texwerk', 'timings.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+  const compiles = log.filter((e) => e.kind === 'compile');
+  assert.equal(compiles.length, 2);
+  assert.ok(compiles.every((e) => e.latexmkMs > 0 && e.runs >= 1 && typeof e.loopMaxMs === 'number' && typeof e.load1 === 'number'), JSON.stringify(compiles));
+  const sent = log.filter((e) => e.kind === 'pdf');
+  assert.deepEqual(sent.map((e) => e.mode), ['full', 'delta', 'full'], 'whole, delta, and whole again for an unknown base');
+  assert.equal(sent[1].bytes, delta.length);
+  const view = log.find((e) => e.kind === 'view');
+  assert.equal(view.fetchMs, 12.5);
+  assert.equal(view.trigger, 'my-compile');
+  assert.equal(view.evil, undefined, 'only known fields are logged');
+  assert.notEqual(view.ua, 'spoofed');
+
   // Downloads and other clients are unchanged.
   const plain = await fetch(`${origin}/pdf/Paper/main.pdf?download`);
   assert.equal(plain.headers.get('content-type'), 'application/pdf');

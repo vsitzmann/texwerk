@@ -712,6 +712,7 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
 
   async function runCompile(clean = false): Promise<void> {
     compileClickedAt = Date.now();
+    viewer.noteCompileClicked(me.name);
     compileBtn.textContent = '… Compiling';
     compileBtn.classList.add('busy');
     try {
