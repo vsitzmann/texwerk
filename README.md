@@ -167,7 +167,14 @@ must not be exposed to the open internet.
   selected in the file tree. Double-clicking an included figure (an image or
   PDF placed by `\includegraphics`) opens a small menu right there: **Jump
   into figure** shows its file, **Jump to where it is included** goes to the
-  `\includegraphics` line.
+  `\includegraphics` line. The PDF's text can be selected and copied (PDF.js's
+  text layer).
+- **Search.** `Ctrl+F` / `⌘F` searches the pane you last clicked in. In the
+  editor that is the file's own search (with replace); over the PDF a search
+  bar (also ⌕ in the PDF toolbar) finds every place a phrase is printed,
+  ignoring case and line breaks, even a word hyphenated across lines; `Enter`
+  and `Shift+Enter` step through the hits, `Esc` closes it. Text selected in
+  the PDF is what it searches for first.
 - **Compile.** `latexmk` with pdfLaTeX, XeLaTeX or LuaLaTeX; auto-compile after
   edits or `Ctrl+S` / `Ctrl+Enter`. `tex/` holds fixed versions of packages
   that are buggy in the server's TeX Live (lineno), found after the project's
@@ -279,6 +286,7 @@ npm run test:fuzz                           # the mirror fuzzer, 5 seeds x 60 st
 node test/e2e-bridge.ts <origin> <project> <mirrorDir>          # with a server and a running bridge
 node test/e2e-latex-editing.ts <origin> <projectsRoot>          # completion, Enter and vim in Chromium
 node test/e2e-links-and-sync.ts <origin>                        # comment links, double-click to PDF, lineno fix
+node test/e2e-pdf-text-search.ts <origin>                       # selecting PDF text, Ctrl+F in the PDF and the editor
 MODE=all node test/stress-bridge.ts <origin> <project> <mirrorDir> 8
 ```
 

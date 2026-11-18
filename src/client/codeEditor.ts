@@ -6,7 +6,7 @@ import {
 } from '@codemirror/view';
 import { RangeSet, StateEffect, StateField, type EditorState as State } from '@codemirror/state';
 import { defaultKeymap, indentWithTab } from '@codemirror/commands';
-import { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
+import { searchKeymap, highlightSelectionMatches, openSearchPanel } from '@codemirror/search';
 import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete';
 import {
   StreamLanguage, HighlightStyle, syntaxHighlighting, bracketMatching, indentOnInput, foldGutter, foldKeymap,
@@ -377,6 +377,12 @@ export class CodeEditor {
 
   currentLine(): number {
     return this.view.state.doc.lineAt(this.view.state.selection.main.head).number;
+  }
+
+  /** The file's search bar (what Ctrl+F opens inside the editor). */
+  openSearch(): void {
+    this.view.focus();
+    openSearchPanel(this.view);
   }
 
   goToLine(line: number, focus = true): void {

@@ -440,6 +440,55 @@ code { color: var(--cyan); }
 .pdf-pages { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 12px; min-width: fit-content; }
 .pdf-page { position: relative; flex: none; background: #fff; box-shadow: 0 2px 10px rgb(0 0 0 / 50%); }
 .pdf-page canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+/* Selectable text over the drawn page: PDF.js's text layer (from its pdf_viewer.css, trimmed). */
+.pdf-page { --scale-round-x: 1px; --scale-round-y: 1px; }
+.textLayer {
+  position: absolute; inset: 0; z-index: 0; overflow: clip;
+  line-height: 1; letter-spacing: normal; word-spacing: normal; text-align: initial; opacity: 1;
+  text-size-adjust: none; -webkit-text-size-adjust: none; forced-color-adjust: none;
+  transform-origin: 0 0; caret-color: CanvasText;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+}
+.textLayer :is(span, br) {
+  position: absolute; color: transparent; white-space: pre; cursor: text;
+  transform-origin: 0% 0%; user-select: text; -webkit-user-select: text;
+}
+.textLayer > :not(.markedContent), .textLayer .markedContent span:not(.markedContent) {
+  z-index: 1;
+  --font-height: 0;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  --scale-x: 1;
+  --rotate: 0deg;
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+.textLayer .markedContent { display: contents; }
+.textLayer span[role="img"] { user-select: none; -webkit-user-select: none; cursor: default; }
+.textLayer ::selection { background: rgb(0 90 255 / 25%); color: transparent; }
+.textLayer br::selection { background: transparent; }
+.textLayer .endOfContent {
+  display: block; position: absolute; inset: 100% 0 0; z-index: 0;
+  cursor: default; user-select: none; -webkit-user-select: none;
+}
+.textLayer.selecting .endOfContent { top: 0; }
+
+/* Search in the PDF. */
+.pdf-find-hit {
+  position: absolute; z-index: 1; pointer-events: none;
+  background: rgb(224 175 104 / 45%); mix-blend-mode: multiply;
+}
+.pdf-find-hit.current { background: rgb(255 140 0 / 70%); outline: 2px solid rgb(255 120 0); }
+.pdf-find {
+  position: absolute; top: 8px; right: 18px; z-index: 5;
+  display: flex; align-items: center; gap: 4px; padding: 4px 6px;
+  border: 1px solid var(--line); background: var(--panel); box-shadow: 0 4px 14px rgb(0 0 0 / 45%);
+}
+.pdf-find input { width: 200px; padding: 3px 6px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; font-size: 12px; }
+.pdf-find input:focus { outline: none; border-color: var(--accent); }
+.pdf-find .count { min-width: 64px; color: var(--dim); font-size: 11px; text-align: center; }
+.pdf-find .count.none { color: var(--danger); }
 .pdf-marker {
   position: absolute;
   left: 0;

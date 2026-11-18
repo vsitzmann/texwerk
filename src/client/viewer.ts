@@ -11,6 +11,8 @@ import { applyDelta, PDF_DELTA_TYPE, PDF_HASH_HEADER } from '@shared/pdfDelta.ts
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
+const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
+
 /**
  * The right-hand pane: the compiled PDF by default, the compile log, or the
  * file picked in the tree (images and PDFs rendered, anything else offered
@@ -26,6 +28,14 @@ interface TextRun {
   top: number;
   size: number;
   width: number;
+  /** The last run of its line. */
+  eol: boolean;
+}
+
+/** A search hit in the compiled PDF: its boxes, one per run it covers, in PDF points from the page's top-left. */
+export interface PdfMatch {
+  page: number;
+  boxes: Array<{ x: number; y: number; width: number; height: number }>;
 }
 
 /** A comment's pin on the PDF, at its SyncTeX position. */
@@ -167,7 +177,7 @@ class PdfView {
   private readonly pagesEl = h('div', { class: 'pdf-pages' });
   private doc: PDFDocumentProxy | null = null;
   private task: PDFDocumentLoadingTask | null = null;
-  private pages: Array<{ el: HTMLDivElement; page: PDFPageProxy; rendered: number; drawn?: boolean; figures?: FigureBox[]; width: number; height: number }> = [];
+  private pages: Array<{ el: HTMLDivElement; page: PDFPageProxy; rendered: number; drawn?: boolean; figures?: FigureBox[]; width: number; height: number; text?: boolean }> = [];
   private observer: IntersectionObserver;
   scale = 1;
   fitWidth = true;
@@ -189,7 +199,7 @@ class PdfView {
       cached = p ? p.page.getTextContent().then((tc) => tc.items.flatMap((item) => {
         if (!('str' in item) || !item.str) return [];
         const size = Math.hypot(item.transform[2], item.transform[3]) || 10;
-        return [{ str: item.str, x: item.transform[4], top: p.height - item.transform[5] - size * 0.8, size, width: item.width }];
+        return [{ str: item.str, x: item.transform[4], top: p.height - item.transform[5] - size * 0.8, size, width: item.width, eol: Boolean(item.hasEOL) }];
       })) : Promise.resolve([]);
       this.textCache.set(pageNumber, cached);
     }
@@ -246,6 +256,98 @@ class PdfView {
     // Printed words we could not find (odd markup, a ligature): the start of
     // the paragraph is close enough.
     return { x: fallbackX, y: top, width: 12, height: 10, exact: false };
+  }
+
+  /**
+   * Every place `query` is printed, in reading order. Case and runs of
+   * spaces are ignored, and a word hyphenated at the end of a line still
+   * matches.
+   */
+  async find(query: string): Promise<PdfMatch[]> {
+    const words = query.trim().split(/\s+/).filter(Boolean);
+    if (!words.length) return [];
+    const esc = (c: string) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = new RegExp(words.map((w) => [...w].map(esc).join('(?:-\\s)?')).join('\\s+'), 'giu');
+    const matches: PdfMatch[] = [];
+    for (let page = 1; page <= this.pages.length; page++) {
+      const items = await this.pageText(page);
+      // The page as one string: runs of a line joined as they are (PDF.js
+      // puts the spaces in), lines joined by a space.
+      let text = '';
+      const starts: number[] = [];
+      for (const item of items) {
+        starts.push(text.length);
+        text += item.str + (item.eol ? ' ' : '');
+      }
+      for (const m of text.matchAll(pattern)) {
+        const from = m.index!;
+        const to = from + m[0].length;
+        const boxes = [];
+        for (let i = 0; i < items.length; i++) {
+          const run = items[i];
+          const a = Math.max(from, starts[i]) - starts[i];
+          const b = Math.min(to, starts[i] + run.str.length) - starts[i];
+          if (b <= a) continue;
+          // Even character widths across a run: close enough to see.
+          const perChar = run.width / Math.max(1, run.str.length);
+          boxes.push({ x: run.x + a * perChar, y: run.top, width: Math.max(2, (b - a) * perChar), height: run.size });
+        }
+        if (boxes.length) matches.push({ page, boxes });
+      }
+    }
+    return matches;
+  }
+
+  private found: PdfMatch[] = [];
+  private foundCurrent = -1;
+
+  /** Highlights search hits, the current one stronger, and scrolls to that one. */
+  showMatches(matches: PdfMatch[], current: number): void {
+    this.found = matches;
+    this.foundCurrent = current;
+    this.drawMatches();
+    const hit = matches[current];
+    const p = hit && this.pages[hit.page - 1];
+    if (p) {
+      const box = hit.boxes[0];
+      const top = p.el.offsetTop + box.y * this.scale;
+      const left = p.el.offsetLeft + box.x * this.scale;
+      if (top < this.scroll.scrollTop + 40 || top > this.scroll.scrollTop + this.scroll.clientHeight - 60) {
+        this.scroll.scrollTop = top - this.scroll.clientHeight / 3;
+      }
+      if (left < this.scroll.scrollLeft || left > this.scroll.scrollLeft + this.scroll.clientWidth - 40) {
+        this.scroll.scrollLeft = left - this.scroll.clientWidth / 3;
+      }
+    }
+  }
+
+  private drawMatches(): void {
+    for (const el of this.pagesEl.querySelectorAll('.pdf-find-hit')) el.remove();
+    this.found.forEach((m, i) => {
+      const p = this.pages[m.page - 1];
+      if (!p) return;
+      for (const b of m.boxes) {
+        // In percent of the page, so zooming needs no redraw.
+        p.el.append(h('div', {
+          class: `pdf-find-hit${i === this.foundCurrent ? ' current' : ''}`,
+          style: `left:${(b.x / p.width) * 100}%;top:${(b.y / p.height) * 100}%;width:${(b.width / p.width) * 100}%;height:${(b.height / p.height) * 100}%`,
+        }));
+      }
+    });
+  }
+
+  /** The page at the top of the view (1-based). */
+  pageInView(): number {
+    const top = this.scroll.scrollTop;
+    const i = this.pages.findIndex((p) => p.el.offsetTop + p.el.offsetHeight > top);
+    return i < 0 ? 1 : i + 1;
+  }
+
+  /** The text selected in this PDF, if any. */
+  selectedText(): string {
+    const sel = getSelection();
+    if (!sel || sel.isCollapsed || !sel.anchorNode || !this.pagesEl.contains(sel.anchorNode)) return '';
+    return sel.toString().replace(/\s+/g, ' ').trim();
   }
 
   /** Pins in the right margin of each page; several on one spot stack. */
@@ -349,6 +451,7 @@ class PdfView {
     this.scroll.scrollLeft = ratioX;
     for (const p of pages) this.observer.observe(p.el);
     void old?.destroy();
+    this.found = [];
     this.drawPins();
     this.onZoom?.();
     return true;
@@ -378,6 +481,8 @@ class PdfView {
     for (const p of this.pages) {
       p.el.style.width = `${Math.floor(p.width * this.scale)}px`;
       p.el.style.height = `${Math.floor(p.height * this.scale)}px`;
+      // The text layer sizes itself, and its text, from this.
+      p.el.style.setProperty('--total-scale-factor', String(this.scale));
     }
   }
 
@@ -453,6 +558,33 @@ class PdfView {
     if (p.rendered !== scale) return;
     p.el.querySelector('canvas')?.remove();
     p.el.prepend(canvas);
+    if (!p.text) this.addTextLayer(p);
+  }
+
+  /**
+   * Invisible text over the drawn page, positioned like the printed words,
+   * so they can be selected and copied. Made once per page; zooming rescales
+   * it through --total-scale-factor.
+   */
+  private addTextLayer(p: (typeof this.pages)[number]): void {
+    const el = h('div', { class: 'textLayer' }) as HTMLDivElement;
+    p.el.querySelector('canvas')!.after(el);
+    p.text = true;
+    // The text itself, not streamTextContent(): the legacy build's text layer
+    // tests the stream with instanceof against another ReadableStream and
+    // then draws nothing.
+    void p.page.getTextContent().then((content) => {
+      const text = new pdfjs.TextLayer({ textContentSource: content, container: el, viewport: p.page.getViewport({ scale: 1 }) });
+      return text.render();
+    }).then(() => {
+      // Where a drag runs past the last word: without this the selection
+      // jumps to the top of the page (what PDF.js's own viewer does too).
+      el.append(h('div', { class: 'endOfContent' }));
+    }).catch(() => { /* a newer PDF replaced this one */ });
+    el.addEventListener('pointerdown', () => {
+      el.classList.add('selecting');
+      document.addEventListener('pointerup', () => el.classList.remove('selecting'), { once: true });
+    });
   }
 
   /**
@@ -567,6 +699,7 @@ export class Viewer {
           this.pdfLoad = null;
           this.pdfFailed = !shown && !this.pdf.loaded;
           this.render();
+          if (shown && this.findOpen && this.findQuery) void this.runFind(true);
           this.opts.onPdfLoaded();
         });
     }
@@ -684,6 +817,7 @@ export class Viewer {
     }
     if (this.tab === 'pdf' && this.pdf.loaded) {
       tools.append(
+        h('button', { class: `ghost icon${this.findOpen ? ' on' : ''}`, title: `Search the PDF (${MOD}+F)`, onclick: () => (this.findOpen ? this.closeFind() : this.openFind()) }, '⌕'),
         h('button', { class: 'ghost icon', title: 'Go to the cursor position in the PDF (Ctrl+Alt+→)', onclick: () => this.opts.onSyncFromCursor() }, '⇢'),
         h('button', { class: 'ghost icon', title: 'Zoom out', onclick: () => this.pdf.zoom(1 / 1.15) }, '−'),
         h('span', { class: 'zoom' }, this.pdf.fitWidth ? 'fit' : `${Math.round(this.pdf.scale * 100)}%`),
@@ -701,8 +835,10 @@ export class Viewer {
     this.renderTabs();
     const content: Node[] = [];
     if (this.tab === 'pdf') {
-      if (this.pdf.loaded) content.push(this.pdf.scroll);
-      else {
+      if (this.pdf.loaded) {
+        content.push(this.pdf.scroll);
+        if (this.findOpen) content.push(this.findBar);
+      } else {
         this.empty.replaceChildren(this.emptyMessage());
         content.push(this.empty);
       }
@@ -720,6 +856,84 @@ export class Viewer {
     // Keep the PDF element alive (and scrolled) while other tabs show.
     for (const child of [...this.body.children]) if (!content.includes(child)) child.remove();
     for (const node of content) if (node.parentNode !== this.body) this.body.append(node);
+  }
+
+  // ------------------------------------------------------------ search
+
+  private findOpen = false;
+  private readonly findInput = h('input', { type: 'search', placeholder: 'Search the PDF', spellcheck: 'false' }) as HTMLInputElement;
+  private readonly findCount = h('span', { class: 'count' });
+  private readonly findBar = h('div', { class: 'pdf-find' },
+    this.findInput, this.findCount,
+    h('button', { class: 'ghost icon', title: 'Previous (Shift+Enter)', onclick: () => this.stepFind(-1) }, '↑'),
+    h('button', { class: 'ghost icon', title: 'Next (Enter)', onclick: () => this.stepFind(1) }, '↓'),
+    h('button', { class: 'ghost icon', title: 'Close (Esc)', onclick: () => this.closeFind() }, '×'));
+  private findMatches: PdfMatch[] = [];
+  private findCurrent = -1;
+  private findQuery = '';
+  private findTimer: number | undefined;
+  private findRun = 0;
+  private findBound = false;
+
+  /** Ctrl+F over the PDF: the search bar, filled with the PDF's selected text if any. */
+  openFind(): void {
+    if (!this.findBound) {
+      this.findBound = true;
+      this.findInput.addEventListener('input', () => {
+        clearTimeout(this.findTimer);
+        this.findTimer = window.setTimeout(() => void this.runFind(), 120);
+      });
+      this.findInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); if (this.findInput.value.trim() !== this.findQuery) void this.runFind(); else this.stepFind(e.shiftKey ? -1 : 1); }
+        else if (e.key === 'Escape') { e.preventDefault(); this.closeFind(); }
+        else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') { e.preventDefault(); this.findInput.select(); }
+        e.stopPropagation();
+      });
+    }
+    const selected = this.pdf.selectedText();
+    if (this.tab !== 'pdf') this.showTab('pdf');
+    this.findOpen = true;
+    this.render();
+    if (selected && selected.length < 200) this.findInput.value = selected;
+    this.findInput.focus();
+    this.findInput.select();
+    if (this.findInput.value.trim() && this.findInput.value.trim() !== this.findQuery) void this.runFind();
+  }
+
+  closeFind(): void {
+    this.findOpen = false;
+    this.findQuery = '';
+    this.findMatches = [];
+    this.pdf.showMatches([], -1);
+    this.render();
+  }
+
+  private async runFind(keep = false): Promise<void> {
+    const run = ++this.findRun;
+    const query = this.findInput.value.trim();
+    const matches = query ? await this.pdf.find(query) : [];
+    if (run !== this.findRun || !this.findOpen) return;
+    const before = this.findCurrent;
+    this.findQuery = query;
+    this.findMatches = matches;
+    // A new search starts at the first hit from the page in view; a new PDF keeps the place.
+    const inView = this.pdf.pageInView();
+    this.findCurrent = !matches.length ? -1 : keep ? Math.min(Math.max(0, before), matches.length - 1)
+      : Math.max(0, matches.findIndex((m) => m.page >= inView));
+    this.pdf.showMatches(matches, this.findCurrent);
+    this.renderFindCount();
+  }
+
+  private stepFind(by: number): void {
+    if (!this.findMatches.length) return;
+    this.findCurrent = (this.findCurrent + by + this.findMatches.length) % this.findMatches.length;
+    this.pdf.showMatches(this.findMatches, this.findCurrent);
+    this.renderFindCount();
+  }
+
+  private renderFindCount(): void {
+    this.findCount.textContent = !this.findQuery ? '' : this.findMatches.length ? `${this.findCurrent + 1} of ${this.findMatches.length}` : 'not found';
+    this.findCount.classList.toggle('none', Boolean(this.findQuery) && !this.findMatches.length);
   }
 
   /** "3.1 of 8.6 MB" while the PDF downloads. */
