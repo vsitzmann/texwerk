@@ -1,4 +1,4 @@
-import { createReadStream, existsSync } from 'node:fs';
+import { createReadStream, existsSync, statSync } from 'node:fs';
 import { mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { hostname, networkInterfaces } from 'node:os';
@@ -20,6 +20,7 @@ import { allThreads, commentsMarkdown, sortThreads } from '../shared/comments.ts
 import { messagesSince, parseRef, type ChatRef } from '../shared/chat.ts';
 import { annotatePdf, pdfPosition } from './pdfComments.ts';
 import { pdfDelta, pdfSnapshot } from './pdfStore.ts';
+import { cleanViewTiming, clientAddress, logTiming } from './timings.ts';
 import { PDF_DELTA_TYPE, PDF_HASH_HEADER } from '../shared/pdfDelta.ts';
 import { refusal } from './origin.ts';
 
@@ -88,6 +89,14 @@ function contentDisposition(kind: 'inline' | 'attachment', name: string): string
 
 /** Types a browser runs scripts in when it navigates to them. */
 const ACTIVE_TYPES = /^(text\/html|image\/svg\+xml|application\/xml|text\/xml|application\/xhtml\+xml)\b/;
+
+/** Browser and platform in a word or two ("Safari/macOS"), enough to tell devices apart in the timings. */
+function userAgent(request: IncomingMessage): string {
+  const ua = String(request.headers['user-agent'] ?? '');
+  const browser = /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : 'other';
+  const os = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Mac OS X/.test(ua) ? 'macOS' : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /Linux/.test(ua) ? 'Linux' : 'other';
+  return `${browser}/${os}`;
+}
 
 /**
  * `untrusted`: a file someone put in a project, served from this origin. It
@@ -460,7 +469,18 @@ export async function startServer(options: ServerOptions) {
       const kept = url.searchParams.has('base') ? pdfSnapshot(project.dir, current) : null;
       if (kept && current) {
         const have = url.searchParams.get('base');
+        const asked = Date.now();
         const delta = have ? await pdfDelta(project.dir, have, current) : null;
+        const encodeMs = Date.now() - asked;
+        const size = delta ? delta.length : statSync(kept).size;
+        // Until the last byte left for the client (into tailscale serve's
+        // buffers, when it fronts the server), or the client went away.
+        response.once('close', () => void logTiming(project.dir, {
+          kind: 'pdf', rev: project.compile.rev, who, ip: clientAddress(request),
+          mode: response.statusCode === 304 ? 'not-modified' : delta ? 'delta' : 'full', status: response.statusCode,
+          bytes: response.statusCode === 304 ? 0 : size, encodeMs, sendMs: Date.now() - asked - encodeMs,
+          complete: response.writableFinished,
+        }));
         if (delta) {
           response.writeHead(200, {
             'content-type': PDF_DELTA_TYPE, 'cache-control': 'no-store',
@@ -736,7 +756,7 @@ export async function startServer(options: ServerOptions) {
     const role = await requireRole(identity, projectParam ?? '', 'view');
     const project = await getProject(projectParam);
     // Commenting is open to viewers, like "commenter" in Google Docs.
-    const reads = method === 'GET' || ['/api/compile', '/api/synctex/edit', '/api/synctex/view', '/api/synctex/lines', '/api/comments', '/api/chat'].includes(path);
+    const reads = method === 'GET' || ['/api/compile', '/api/timing', '/api/synctex/edit', '/api/synctex/view', '/api/synctex/lines', '/api/comments', '/api/chat'].includes(path);
     if (!reads && role === 'view') throw new HttpError(403, 'you have view-only access to this project');
     const bodyPath = (p: unknown) => {
       const clean = cleanPath(String(p ?? ''));
@@ -919,6 +939,12 @@ export async function startServer(options: ServerOptions) {
       }
       const message = project.say(text, { author: who, login: identity.login, agent: bridge }, names, ref);
       return json(response, 200, { message });
+    }
+
+    // A browser's account of one PDF reaching its screen (see timings.ts).
+    if (path === '/api/timing' && method === 'POST') {
+      await logTiming(project.dir, { kind: 'view', who, ip: clientAddress(request), ua: userAgent(request), ...cleanViewTiming(await readJson(request)) });
+      return json(response, 200, { ok: true });
     }
 
     if (path === '/api/synctex/lines' && method === 'POST') {

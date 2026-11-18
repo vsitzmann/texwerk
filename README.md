@@ -193,6 +193,17 @@ must not be exposed to the open internet.
   (1.5 s, or 150,000 drawing operations: a vector scatter plot with tens of
   thousands of points). A click lists the largest files the paper includes
   and the slow pages, with how to shrink or rasterize them.
+- **Timings, for when it felt slow.** Every compile, every PDF sent and every
+  PDF reaching a screen is logged to the project's `.texwerk/timings.jsonl`:
+  - the compile: waiting behind another, latexmk and its number of runs, the
+    server's load, free memory and longest event-loop stall;
+  - the download: whole or delta, bytes, time, as the server and as the
+    browser saw it, with the browser's tailnet address and device;
+  - PDF.js reading and drawing, and the whole wait from the click (or the
+    compile finishing) until the new PDF is on screen.
+
+  `node src/server/timingsReport.ts <projects root> [--since 2026-11-18]
+  [--slow 5]` prints one line per wait and names the part that took longest.
 - **Download** the project as a .zip or the compiled PDF at any time. New
   projects from a template, from an uploaded .zip, or by cloning a git repo.
 
@@ -265,7 +276,8 @@ re-sync, keeping local edits they had not sent yet.
   server) are folded back in as minimal edits. `history.ts` keeps the edit
   history in `.texwerk/history/`, `git.ts` the labels, `compile.ts` runs
   latexmk into `.texwerk/build/`, `pdfStore.ts` keeps recent PDFs and sends
-  viewers what changed (`shared/pdfDelta.ts`), `identity.ts` and `access.ts` decide who
+  viewers what changed (`shared/pdfDelta.ts`), `timings.ts` logs how long
+  each step took, `identity.ts` and `access.ts` decide who
   may open or edit what, and `origin.ts` turns away other websites.
   `.texwerk/` is excluded from git.
 - `src/client/` — the browser app (CodeMirror 6 + y-codemirror.next, PDF.js).

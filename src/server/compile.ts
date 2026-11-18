@@ -76,6 +76,8 @@ function sandboxed(command: string, args: string[], dir: string, out: string | n
 export interface CompileRun {
   ok: boolean;
   upToDate: boolean;
+  /** latexmk had nothing to do after a failure, so it was rerun with -g. */
+  forced?: boolean;
   pdf: string | null;
   output: string;
   log: string;
@@ -116,10 +118,11 @@ export async function runLatexmk(projectDir: string, settings: ProjectSettings, 
   ];
   let output = await latexmk(projectDir, outDir, args(false));
   let upToDate = /All targets .* are up-to-date/.test(output.text);
-  if (opts.force && !/^Run number /m.test(output.text)) {
-    const forced = await latexmk(projectDir, outDir, args(true));
-    output = { code: forced.code, text: `${output.text}${forced.text}` };
-    upToDate = /All targets .* are up-to-date/.test(forced.text);
+  const forced = Boolean(opts.force) && !/^Run number /m.test(output.text);
+  if (forced) {
+    const rerun = await latexmk(projectDir, outDir, args(true));
+    output = { code: rerun.code, text: `${output.text}${rerun.text}` };
+    upToDate = /All targets .* are up-to-date/.test(rerun.text);
   }
   const stem = basename(main).replace(/\.[^.]+$/, '');
   let log = '';
@@ -134,6 +137,7 @@ export async function runLatexmk(projectDir: string, settings: ProjectSettings, 
   return {
     ok: output.code === 0 && !hasErrors,
     upToDate,
+    forced,
     pdf: existsSync(pdfPath) ? pdfPath : null,
     output: output.text,
     log,
