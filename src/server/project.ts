@@ -20,6 +20,7 @@ import { chatArray, cleanMessage, findMentions, fromJsonl, toJsonl, type ChatMes
 import { authorRuns } from '../shared/provenance.ts';
 import { isMassDeletion, MASS_DELETION_WINDOW_MS } from '../shared/deletionGuard.ts';
 import { BUILD_DIR, pdfWeight, runLatexmk } from './compile.ts';
+import { snapshotPdf } from './pdfStore.ts';
 import { ensureRepo } from './git.ts';
 import { hashBytes, History } from './history.ts';
 import { listTrash, moveToTrash, PROJECT_TRASH, readEntry, restoreFromTrash, type TrashMeta } from './trash.ts';
@@ -292,6 +293,8 @@ export class Project {
       this.compile = { ...saved, state: 'done', hasPdf: Boolean(this.lastPdf) };
       // Compiles saved before the PDF's size was recorded.
       if (this.lastPdf && this.compile.pdfBytes === undefined) Object.assign(this.compile, await pdfWeight(this.dir, this.lastPdf).catch(() => ({})));
+      // Compiles saved before PDFs were kept for deltas, or a kept copy since pruned.
+      this.compile.pdfHash = this.lastPdf ? await snapshotPdf(this.dir, this.lastPdf).catch(() => undefined) : undefined;
       this.lastOutput = await readFile(join(this.dir, BUILD_DIR, 'texwerk-output.txt'), 'utf8').catch(() => '');
       const stem = saved.mainFile.split('/').pop()!.replace(/\.[^.]+$/, '');
       this.lastLog = await readFile(join(this.dir, BUILD_DIR, `${stem}.log`), 'latin1').catch(() => '');
@@ -855,6 +858,7 @@ export class Project {
       issues: run.issues,
       upToDate: run.upToDate,
       ...(this.lastPdf ? await pdfWeight(this.dir, this.lastPdf).catch(() => ({})) : {}),
+      pdfHash: this.lastPdf ? await snapshotPdf(this.dir, this.lastPdf).catch(() => undefined) : undefined,
     };
     await writeFile(join(this.dir, BUILD_DIR, 'texwerk-compile.json'), JSON.stringify({ ...this.compile, pdf: this.lastPdf }));
     this.broadcastEvent({ t: 'compile', compile: this.compile });

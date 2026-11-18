@@ -173,9 +173,13 @@ must not be exposed to the open internet.
   that are buggy in the server's TeX Live (lineno), found after the project's
   own files and before TeX Live's. The Log tab lists errors and warnings with
   links to the line, and the raw latexmk output and TeX log.
-- **PDF size and speed.** The menu bar shows the compiled PDF's size: green
-  below 15 MB, yellow below 40 MB, red above, since every viewer downloads the
-  whole PDF after each compile. While it downloads, the PDF pane shows how
+- **PDF size and speed.** After a compile, each viewer downloads only what
+  changed in the PDF, not all of it: the figures are the same bytes as
+  before, so a text edit to a 10 MB paper comes to about 100 KB. The server
+  keeps the last four PDFs in `.texwerk/pdfs/` to diff against; a viewer
+  further behind, or opening the project, downloads the whole file. The menu
+  bar shows the compiled PDF's size: green below 15 MB, yellow below 40 MB,
+  red above. While it downloads, the PDF pane shows how
   much has arrived; reopening a project whose PDF has not changed reuses the
   browser's copy (it only checks with the server that it is still current
   and that you still have access). It also warns when a page is slow to draw
@@ -253,7 +257,8 @@ re-sync, keeping local edits they had not sent yet.
   files on disk within ~120 ms; changes on disk (git pull, a shell on the
   server) are folded back in as minimal edits. `history.ts` keeps the edit
   history in `.texwerk/history/`, `git.ts` the labels, `compile.ts` runs
-  latexmk into `.texwerk/build/`, `identity.ts` and `access.ts` decide who
+  latexmk into `.texwerk/build/`, `pdfStore.ts` keeps recent PDFs and sends
+  viewers what changed (`shared/pdfDelta.ts`), `identity.ts` and `access.ts` decide who
   may open or edit what, and `origin.ts` turns away other websites.
   `.texwerk/` is excluded from git.
 - `src/client/` — the browser app (CodeMirror 6 + y-codemirror.next, PDF.js).
