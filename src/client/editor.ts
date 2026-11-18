@@ -1060,7 +1060,21 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
   // ------------------------------------------------------------ keys
   window.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'Enter')) { e.preventDefault(); void runCompile(); }
+    // Ctrl+F searches the pane last clicked in: the PDF, or the file being
+    // edited (inside the editor, its own search handles the key first). The
+    // browser's find sees neither: the PDF is drawn, and the editor only
+    // renders the lines in view.
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'f' && !e.defaultPrevented) {
+      if (lastPane === 'viewer' && viewer.pdfLoaded) { e.preventDefault(); viewer.openFind(); }
+      else if (current) { e.preventDefault(); current.openSearch(); }
+    }
   });
+  let lastPane: 'editor' | 'viewer' = 'editor';
+  document.addEventListener('pointerdown', (e) => {
+    const target = e.target as Node;
+    if (viewer.root.contains(target)) lastPane = 'viewer';
+    else if (editorPane.contains(target)) lastPane = 'editor';
+  }, true);
 
 }
 
