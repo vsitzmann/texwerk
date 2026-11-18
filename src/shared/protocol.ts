@@ -43,15 +43,17 @@ export interface CompileSummary {
   issues: CompileIssue[];
   /** latexmk found nothing changed since the last compile. */
   upToDate?: boolean;
-  /** Size of the compiled PDF, which every viewer downloads after each compile. */
+  /** Size of the compiled PDF, which every viewer downloads on opening the project. */
   pdfBytes?: number;
+  /** SHA-256 of the compiled PDF: a viewer that has it already downloads nothing, one with an older PDF only what changed. */
+  pdfHash?: string;
   /** The biggest project files the compile read (1 MB and up), largest first: what makes the PDF big. */
   heaviestInputs?: Array<{ path: string; bytes: number }>;
 }
 
 /**
- * A PDF this size or more is slow to fetch after every compile, more so for
- * collaborators at home: the menu bar shows its size in yellow, then red.
+ * A PDF this size or more is slow to open, more so for collaborators at
+ * home: the menu bar shows its size in yellow, then red.
  */
 export const PDF_SIZE_WARN = 15e6;
 export const PDF_SIZE_BAD = 40e6;

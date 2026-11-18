@@ -89,10 +89,14 @@ const ENGINE_FLAG: Record<ProjectSettings['engine'], string> = {
 };
 
 /**
- * `force` reruns TeX even when latexmk thinks nothing changed — after a failed
+ * `force` reruns TeX when latexmk would otherwise do nothing: after a failed
  * run the sources may be the same while the environment is not (a package
- * installed, a figure fixed outside the project). `clean` empties the build
- * directory first ("Recompile from scratch").
+ * installed, a figure fixed outside the project), and latexmk declines to
+ * rerun what "gave an error in previous invocation". Only then: forcing
+ * every compile (-g) of a document that always has some error, a BibTeX
+ * warning or a missing reference, reran BibTeX and TeX two or three extra
+ * times for nothing. `clean` empties the build directory first ("Recompile
+ * from scratch").
  */
 export async function runLatexmk(projectDir: string, settings: ProjectSettings, opts: { force?: boolean; clean?: boolean } = {}): Promise<CompileRun> {
   const outDir = join(projectDir, BUILD_DIR);
@@ -105,12 +109,40 @@ export async function runLatexmk(projectDir: string, settings: ProjectSettings, 
   if (main.startsWith('-')) {
     return { ok: false, upToDate: false, pdf: null, output: `The main file "${main}" starts with "-". Rename it.`, log: '', issues: [] };
   }
-  const args = [
+  const args = (force: boolean) => [
     '-norc', ENGINE_FLAG[settings.engine] ?? '-pdf',
-    '-f', ...(opts.force ? ['-g'] : []), '-interaction=nonstopmode', '-file-line-error', '-synctex=1',
+    '-f', ...(force ? ['-g'] : []), '-interaction=nonstopmode', '-file-line-error', '-synctex=1',
     `-outdir=${outDir}`, main,
   ];
-  const output = await new Promise<{ code: number | null; text: string }>((resolve) => {
+  let output = await latexmk(projectDir, outDir, args(false));
+  let upToDate = /All targets .* are up-to-date/.test(output.text);
+  if (opts.force && !/^Run number /m.test(output.text)) {
+    const forced = await latexmk(projectDir, outDir, args(true));
+    output = { code: forced.code, text: `${output.text}${forced.text}` };
+    upToDate = /All targets .* are up-to-date/.test(forced.text);
+  }
+  const stem = basename(main).replace(/\.[^.]+$/, '');
+  let log = '';
+  try { log = await readFile(join(outDir, `${stem}.log`), 'latin1'); } catch { /* no log */ }
+  const pdfPath = join(outDir, `${stem}.pdf`);
+  const issues = parseLog(log);
+  // BibTeX reports into its own log; a missing style or database there only
+  // shows up as "??" citations otherwise.
+  try { issues.unshift(...parseBibtexLog(await readFile(join(outDir, `${stem}.blg`), 'latin1'), projectDir, main)); } catch { /* no bibtex run */ }
+  await writeFile(join(outDir, 'texwerk-output.txt'), output.text);
+  const hasErrors = issues.some((i) => i.level === 'error');
+  return {
+    ok: output.code === 0 && !hasErrors,
+    upToDate,
+    pdf: existsSync(pdfPath) ? pdfPath : null,
+    output: output.text,
+    log,
+    issues,
+  };
+}
+
+function latexmk(projectDir: string, outDir: string, args: string[]): Promise<{ code: number | null; text: string }> {
+  return new Promise((resolve) => {
     let text = '';
     const [command, commandArgs] = sandboxed('latexmk', args, projectDir, outDir);
     const child = spawn(command, commandArgs, { cwd: projectDir, env: {
@@ -127,24 +159,6 @@ export async function runLatexmk(projectDir: string, settings: ProjectSettings, 
     });
     child.on('close', (code) => { clearTimeout(timer); resolve({ code, text }); });
   });
-  const stem = basename(main).replace(/\.[^.]+$/, '');
-  let log = '';
-  try { log = await readFile(join(outDir, `${stem}.log`), 'latin1'); } catch { /* no log */ }
-  const pdfPath = join(outDir, `${stem}.pdf`);
-  const issues = parseLog(log);
-  // BibTeX reports into its own log; a missing style or database there only
-  // shows up as "??" citations otherwise.
-  try { issues.unshift(...parseBibtexLog(await readFile(join(outDir, `${stem}.blg`), 'latin1'), projectDir, main)); } catch { /* no bibtex run */ }
-  await writeFile(join(outDir, 'texwerk-output.txt'), output.text);
-  const hasErrors = issues.some((i) => i.level === 'error');
-  return {
-    ok: output.code === 0 && !hasErrors,
-    upToDate: /All targets .* are up-to-date/.test(output.text),
-    pdf: existsSync(pdfPath) ? pdfPath : null,
-    output: output.text,
-    log,
-    issues,
-  };
 }
 
 /**

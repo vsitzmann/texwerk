@@ -7,6 +7,7 @@ import type { PDFDocumentLoadingTask, PDFDocumentProxy, PDFPageProxy } from 'pdf
 import { extensionOf, IMAGE_EXTENSIONS } from '@shared/files.ts';
 import { formatMegabytes, type CompileIssue, type CompileSummary } from '@shared/protocol.ts';
 import { h, withName } from './ui.ts';
+import { applyDelta, PDF_DELTA_TYPE, PDF_HASH_HEADER } from '@shared/pdfDelta.ts';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -304,11 +305,10 @@ class PdfView {
     }, { passive: false });
   }
 
-  /** Show the PDF at `url`; false if it could not be loaded or a newer load replaced it. */
-  async load(url: string, onProgress?: (loaded: number, total: number) => void): Promise<boolean> {
+  /** Show the PDF (its bytes, or a URL); false if it could not be loaded or a newer load replaced it. */
+  async load(source: Uint8Array | string): Promise<boolean> {
     const token = ++this.loadToken;
-    const task = pdfjs.getDocument({ url });
-    if (onProgress) task.onProgress = ({ loaded, total }: { loaded: number; total: number }) => onProgress(loaded, total);
+    const task = pdfjs.getDocument(typeof source === 'string' ? { url: source } : { data: source });
     const pages: typeof this.pages = [];
     let doc: PDFDocumentProxy;
     try {
@@ -499,6 +499,8 @@ export class Viewer {
   private showRaw = false;
   private readonly opts: ViewerOptions;
   private lastPdfRev = -1;
+  /** The newest PDF downloaded, so the next compile only needs to send what changed. */
+  private have: PdfBytes | null = null;
   private commentsPanel: HTMLElement | null = null;
   private commentCount = 0;
   private chatPanel: HTMLElement | null = null;
@@ -533,7 +535,9 @@ export class Viewer {
     this.compile = summary;
     if (output !== undefined) this.output = output;
     if (log !== undefined) this.log = log;
-    if (summary.state === 'done' && summary.hasPdf && summary.rev !== this.lastPdfRev) {
+    if (summary.state === 'done' && summary.hasPdf && summary.rev !== this.lastPdfRev
+      // latexmk found nothing to do: the PDF showing is the new one.
+      && !(summary.pdfHash && summary.pdfHash === this.have?.hash && this.pdf.loaded)) {
       this.lastPdfRev = summary.rev;
       const load = { loaded: 0, total: summary.pdfBytes ?? 0 };
       this.pdfLoad = load;
@@ -549,7 +553,15 @@ export class Viewer {
         if (total) load.total = total;
         if (this.pdfLoad === load && formatMegabytes(loaded) !== shown) this.render();
       };
-      void this.pdf.load(withName(`/pdf/${encodeURIComponent(this.opts.project())}/output.pdf?rev=${summary.rev}`), onProgress)
+      const url = `/pdf/${encodeURIComponent(this.opts.project())}/output.pdf?rev=${summary.rev}`;
+      void fetchPdf(url, this.have, onProgress)
+        .then((got) => {
+          if (!got || this.pdfLoad !== load) return false;
+          if (got.hash) this.have = got;
+          // PDF.js takes the bytes over; keep ours for the next delta.
+          return this.pdf.load(got.bytes.slice());
+        })
+        .catch(() => false)
         .then((shown) => {
           if (this.pdfLoad !== load) return;
           this.pdfLoad = null;
@@ -795,4 +807,56 @@ export class Viewer {
         h('a', { href: `${url}&download=1` }, h('button', {}, 'Download')))));
     }
   }
+}
+
+interface PdfBytes { hash: string; bytes: Uint8Array }
+
+/**
+ * The compiled PDF at `url`. Holding an earlier PDF, ask for only what
+ * changed since: after a text edit that is ~100 KB of a 10 MB paper, the
+ * rest (the figures) being the same bytes as before. A delta that does not
+ * rebuild the PDF the server named falls back to the whole file. Null when
+ * the download failed.
+ */
+async function fetchPdf(url: string, have: PdfBytes | null, onProgress: (loaded: number, total: number) => void): Promise<PdfBytes | null> {
+  const response = await fetch(withName(`${url}&base=${have?.hash ?? ''}`));
+  if (!response.ok) return null;
+  const hash = response.headers.get(PDF_HASH_HEADER) ?? '';
+  const body = await readAll(response, onProgress);
+  if (response.headers.get('content-type') !== PDF_DELTA_TYPE) return { hash, bytes: body };
+  try {
+    if (!have) throw new Error('a delta without a base');
+    const bytes = applyDelta(have.bytes, body);
+    const digest = await sha256(bytes);
+    if (digest !== null && digest !== hash) throw new Error('the delta did not rebuild the PDF');
+    return { hash, bytes };
+  } catch {
+    return have ? fetchPdf(url, null, onProgress) : null;
+  }
+}
+
+async function readAll(response: Response, onProgress: (loaded: number, total: number) => void): Promise<Uint8Array> {
+  const total = Number(response.headers.get('content-length')) || 0;
+  const reader = response.body?.getReader();
+  if (!reader) return new Uint8Array(await response.arrayBuffer());
+  const parts: Uint8Array[] = [];
+  let loaded = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value);
+    loaded += value.length;
+    onProgress(loaded, total);
+  }
+  const bytes = new Uint8Array(loaded);
+  let at = 0;
+  for (const p of parts) { bytes.set(p, at); at += p.length; }
+  return bytes;
+}
+
+/** Hex SHA-256, or null where the page has no WebCrypto (plain http on a LAN): the delta's own length checks have to do. */
+async function sha256(bytes: Uint8Array): Promise<string | null> {
+  if (!crypto.subtle) return null;
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>));
+  return [...digest].map((b) => b.toString(16).padStart(2, '0')).join('');
 }

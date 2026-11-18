@@ -221,7 +221,7 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
       bytes !== undefined ? h('span', { class: `size ${level}` }, formatMegabytes(bytes)) : '',
       slowPages.length ? h('span', { class: 'slow' }, `⚠ slow ${pageList(slowPages)}`) : '');
     pdfInfoBtn.title = [
-      bytes !== undefined ? `The compiled PDF is ${formatMegabytes(bytes)}. Everyone viewing the project downloads all of it after every compile.` : '',
+      bytes !== undefined ? `The compiled PDF is ${formatMegabytes(bytes)}. Everyone opening the project downloads all of it.` : '',
       slowPages.length ? `Some pages take long to draw: ${pageList(slowPages)}.` : '',
       'Click for details.',
     ].filter(Boolean).join(' ');
@@ -234,7 +234,7 @@ export async function renderEditor(app: HTMLElement, project: string, meInfo: Me
       h('h2', {}, 'PDF size and speed'),
       ...(bytes !== undefined ? [
         h('p', {}, 'The compiled PDF is ', h('b', { class: `pdf-size-text ${pdfSizeLevel(bytes)}` }, formatMegabytes(bytes)), '. ',
-          'Everyone viewing the project downloads the whole PDF again after every compile, so a big PDF makes each compile feel slow, more so on a home connection. ',
+          'Everyone opening the project downloads all of it, which is slow on a home connection; after a compile, viewers only download what changed, usually much less unless a figure changed. ',
           `The size shows green below ${PDF_SIZE_WARN / 1e6} MB, yellow below ${PDF_SIZE_BAD / 1e6} MB, and red above.`),
         ...(heavy.length && pdfSizeLevel(bytes) !== 'ok' ? [
           h('h3', {}, 'Largest files the paper includes'),

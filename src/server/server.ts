@@ -19,6 +19,8 @@ import { readZip, writeZip } from './zip.ts';
 import { allThreads, commentsMarkdown, sortThreads } from '../shared/comments.ts';
 import { messagesSince, parseRef, type ChatRef } from '../shared/chat.ts';
 import { annotatePdf, pdfPosition } from './pdfComments.ts';
+import { pdfDelta, pdfSnapshot } from './pdfStore.ts';
+import { PDF_DELTA_TYPE, PDF_HASH_HEADER } from '../shared/pdfDelta.ts';
 import { refusal } from './origin.ts';
 
 /**
@@ -94,7 +96,7 @@ const ACTIVE_TYPES = /^(text\/html|image\/svg\+xml|application\/xml|text\/xml|ap
  * sandboxed. PDFs are left alone, since browsers' PDF viewers refuse to run
  * sandboxed and a PDF cannot reach the page's origin anyway.
  */
-async function sendFile(request: IncomingMessage, response: ServerResponse, abs: string, opts: { download?: string; noStore?: boolean; immutable?: boolean; untrusted?: boolean } = {}): Promise<void> {
+async function sendFile(request: IncomingMessage, response: ServerResponse, abs: string, opts: { download?: string; noStore?: boolean; immutable?: boolean; untrusted?: boolean; headers?: Record<string, string> } = {}): Promise<void> {
   let info;
   try { info = await stat(abs); } catch { throw new HttpError(404, 'not found'); }
   if (!info.isFile()) throw new HttpError(404, 'not found');
@@ -107,6 +109,7 @@ async function sendFile(request: IncomingMessage, response: ServerResponse, abs:
     if (type !== 'application/pdf') sandbox['content-security-policy'] = "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'";
   }
   const headers: Record<string, string> = {
+    ...opts.headers,
     ...sandbox,
     'content-type': type,
     'cache-control': opts.noStore ? 'no-store' : opts.immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
@@ -449,6 +452,24 @@ export async function startServer(options: ServerOptions) {
         });
         response.end(annotated);
         return;
+      }
+      // The viewer says which PDF it has (`base`, empty for none): it gets
+      // only what changed since, or else the whole of the kept copy, which
+      // no compile writes into while it downloads.
+      const current = project.compile.pdfHash;
+      const kept = url.searchParams.has('base') ? pdfSnapshot(project.dir, current) : null;
+      if (kept && current) {
+        const have = url.searchParams.get('base');
+        const delta = have ? await pdfDelta(project.dir, have, current) : null;
+        if (delta) {
+          response.writeHead(200, {
+            'content-type': PDF_DELTA_TYPE, 'cache-control': 'no-store',
+            'content-length': String(delta.length), [PDF_HASH_HEADER]: current,
+          });
+          response.end(delta);
+          return;
+        }
+        return sendFile(request, response, kept, { headers: { [PDF_HASH_HEADER]: current } });
       }
       const download = url.searchParams.has('download') ? `${base}.pdf` : undefined;
       // Revalidated on every use (so access is still checked), but a reload with
