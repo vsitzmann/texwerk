@@ -1,7 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
-  <!-- DeckWerk's offset-frame mark, as a page with TeX initials. -->
+  <!-- DeckWerk's offset-frame mark as a page: TeX initials over lines of text.
+       The initials are Monaspace Krypton Bold outlines, since a favicon cannot
+       load the app's web fonts. -->
   <rect x="68" y="68" width="888" height="888" rx="144" fill="#1a1b26"/>
   <rect x="262" y="168" width="544" height="704" fill="none" stroke="#565f89" stroke-width="24"/>
   <rect x="218" y="212" width="544" height="704" fill="#1a1b26" stroke="#c0caf5" stroke-width="28"/>
-  <text x="490" y="650" fill="#7aa2f7" font-family="Monaspace Krypton, monospace" font-size="260" font-weight="700" text-anchor="middle">TW</text>
+  <path fill="#c0caf5" d="M397.8 335.3H433.4V500H397.8ZM353.7 324.8H477.5L479.8 354.1H351.4ZM500.9 416.5V324.8H530.6V413.5L541.4 467.8H538.6L552.3 407.6V376.5H576.6V407.5L590.3 467.8H587.5L598.3 413.6V324.8H627.9V416.5L605.6 500H579.6L561.1 427.9H567.9L548.4 500H523.2Z"/>
+  <rect x="300" y="600" width="380" height="26" fill="#565f89"/>
+  <rect x="300" y="670" width="380" height="26" fill="#565f89"/>
+  <rect x="300" y="740" width="260" height="26" fill="#565f89"/>
 </svg>
