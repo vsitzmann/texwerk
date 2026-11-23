@@ -1,6 +1,9 @@
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
+import type { Socket } from 'node:net';
+import type { Duplex } from 'node:stream';
 import { hostname, networkInterfaces } from 'node:os';
 import { extname, join, resolve } from 'node:path';
 import { WebSocketServer } from 'ws';
@@ -23,11 +26,13 @@ import { pdfDelta, pdfSnapshot } from './pdfStore.ts';
 import { cleanViewTiming, clientAddress, logTiming } from './timings.ts';
 import { PDF_DELTA_TYPE, PDF_HASH_HEADER } from '../shared/pdfDelta.ts';
 import { refusal } from './origin.ts';
+import { DEFAULT_TAILSCALED_SOCKET, tailnetWhoIs, type TailnetUser } from './tailscaleIdentity.ts';
 
 /**
  * The TeXWerk server: one HTTP port serving the browser client, a JSON API,
  * raw project files, the compiled PDFs, the mirror bridge script, and a
- * WebSocket per open project for live collaboration.
+ * WebSocket per open project for live collaboration. With `tls`, the same
+ * again over HTTPS on the tailnet address (see tailscaleIdentity.ts).
  *
  * Every top-level folder of `rootDir` is a project (and a git repository).
  * Nothing outside `rootDir` is ever read or written.
@@ -42,6 +47,22 @@ export interface ServerOptions {
   access: AccessConfig | null;
   /** Host names besides the ones `hostAllowed` accepts on its own (see origin.ts). */
   allowHosts?: string[];
+  /**
+   * Also serve HTTPS on the tailnet address, terminating TLS here instead of
+   * behind `tailscale serve`, whose userspace TCP stack moves a tenth of what
+   * the tunnel carries. Each connection there is whoever tailscaled's `whois`
+   * names for its peer. The loopback listener above stays as it is.
+   */
+  tls?: TlsOptions;
+}
+
+export interface TlsOptions {
+  host: string;
+  port: number;
+  certFile: string;
+  keyFile: string;
+  /** tailscaled's LocalAPI socket; the default is where tailscaled puts it on Linux. */
+  tailscaleSocket?: string;
 }
 
 const MIME: Record<string, string> = {
@@ -375,9 +396,14 @@ export async function startServer(options: ServerOptions) {
     return url.searchParams.get('newName') ?? url.searchParams.get('name');
   }
 
-  function identityOf(request: IncomingMessage, url: URL): Identity {
-    const identity = resolveIdentity(request, options.access, url.searchParams.get('name') ?? request.headers['x-texwerk-name'] as string ?? null);
-    if (!identity) throw new HttpError(403, 'unidentified connection — this server is reachable only through tailscale serve');
+  // Connections to the tailnet HTTPS listener, and who tailscaled says is on the other end.
+  const tailnetUsers = new WeakMap<Socket, Promise<TailnetUser | null>>();
+  /** For a request over the tailnet listener its whois answer, else undefined. */
+  const tailnetUserOf = (request: IncomingMessage) => tailnetUsers.get(request.socket);
+
+  function identityOf(request: IncomingMessage, url: URL, tailnet: TailnetUser | null | undefined): Identity {
+    const identity = resolveIdentity(request, options.access, url.searchParams.get('name') ?? request.headers['x-texwerk-name'] as string ?? null, tailnet);
+    if (!identity) throw new HttpError(403, tailnet === null ? 'unidentified connection — tailscaled does not know this device, or it is a tagged device' : 'unidentified connection — this server is reachable only over the tailnet');
     return identity;
   }
 
@@ -387,7 +413,7 @@ export async function startServer(options: ServerOptions) {
     const method = request.method ?? 'GET';
     const refused = refusal(request, options.allowHosts ?? []);
     if (refused) throw new HttpError(403, refused);
-    const identity = identityOf(request, url);
+    const identity = identityOf(request, url, await tailnetUserOf(request));
     if (users) void users.note(identity);
     const bridge = request.headers[BRIDGE_HEADER] === '1';
     const who = bridge ? `${identity.name} · agent` : identity.name;
@@ -1096,17 +1122,46 @@ export async function startServer(options: ServerOptions) {
     throw new HttpError(404, 'not found');
   }
 
-  const server = createServer((request, response) => {
+  const serveRequest = (request: IncomingMessage, response: ServerResponse) => {
     handle(request, response).catch((err: unknown) => {
       const status = err instanceof HttpError ? err.status : 500;
       if (status === 500) console.error(err);
       if (!response.headersSent) json(response, status, { error: (err as Error).message });
       else response.end();
     });
-  });
+  };
+  const server = createServer(serveRequest);
+
+  // The tailnet listener: TLS here, over the kernel's TCP. Its certificate is
+  // `tailscale cert`'s, renewed by a timer outside the server; a renewed pair
+  // is picked up within the hour without dropping anyone.
+  const tls = options.tls;
+  let httpsServer: HttpsServer | null = null;
+  let tlsReload: ReturnType<typeof setInterval> | null = null;
+  if (tls) {
+    const readTls = async () => {
+      const [cert, key, certStat, keyStat] = await Promise.all([readFile(tls.certFile), readFile(tls.keyFile), stat(tls.certFile), stat(tls.keyFile)]);
+      return { cert, key, stamp: `${certStat.mtimeMs}:${keyStat.mtimeMs}` };
+    };
+    const first = await readTls();
+    let stamp = first.stamp;
+    httpsServer = createHttpsServer({ cert: first.cert, key: first.key }, serveRequest);
+    // Who is on the other end is settled once per connection, at the handshake.
+    httpsServer.on('secureConnection', (socket) => {
+      tailnetUsers.set(socket, tailnetWhoIs(socket.remoteAddress ?? '', socket.remotePort ?? 0, tls.tailscaleSocket ?? DEFAULT_TAILSCALED_SOCKET));
+    });
+    tlsReload = setInterval(() => {
+      void readTls().then((next) => {
+        if (next.stamp === stamp) return;
+        httpsServer?.setSecureContext({ cert: next.cert, key: next.key });
+        stamp = next.stamp;
+      }, (err: unknown) => console.error('could not reload the TLS certificate:', (err as Error).message));
+    }, 60 * 60 * 1000);
+    tlsReload.unref();
+  }
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 * 1024 });
-  server.on('upgrade', (request, socket, head) => {
+  const onUpgrade = async (request: IncomingMessage, socket: Duplex, head: Buffer) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
     if (url.pathname !== '/ws') { socket.destroy(); return; }
     if (refusal(request, options.allowHosts ?? [])) {
@@ -1115,7 +1170,7 @@ export async function startServer(options: ServerOptions) {
       return;
     }
     let identity: Identity;
-    try { identity = identityOf(request, url); } catch {
+    try { identity = identityOf(request, url, await tailnetUserOf(request)); } catch {
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       socket.destroy();
       return;
@@ -1150,20 +1205,39 @@ export async function startServer(options: ServerOptions) {
         ws.close(status === 404 ? 4404 : status === 403 ? 4403 : 1011, (err as Error).message.slice(0, 120));
       });
     });
-  });
+  };
+
+  server.on('upgrade', (request, socket, head) => void onUpgrade(request, socket, head));
+  httpsServer?.on('upgrade', (request, socket, head) => void onUpgrade(request, socket, head));
 
   await new Promise<void>((done) => server.listen(options.port, options.host, done));
+  let tlsPort: number | undefined;
+  if (httpsServer && tls) {
+    const listening = httpsServer;
+    tlsPort = await new Promise<number>((done, fail) => {
+      listening.once('error', fail);
+      listening.listen(tls.port, tls.host, () => {
+        listening.off('error', fail);
+        const address = listening.address();
+        done(typeof address === 'object' && address ? address.port : tls.port);
+      });
+    });
+  }
 
   const urls: string[] = [];
   const hosts = options.host === '0.0.0.0' || options.host === '::'
     ? Object.values(networkInterfaces()).flat().filter((i) => i && i.family === 'IPv4').map((i) => i!.address)
     : [options.host];
   for (const h of hosts) urls.push(`http://${h}:${options.port}/`);
+  if (tls && tlsPort) urls.push(`https://${tls.host.includes(':') ? `[${tls.host}]` : tls.host}:${tlsPort}/`);
 
   return {
     urls,
+    tlsPort,
     async close() {
       server.close();
+      httpsServer?.close();
+      if (tlsReload) clearInterval(tlsReload);
       for (const ws of wss.clients) ws.terminate();
       await Promise.all([...projects.values()].map(async (p) => (await p.catch(() => null))?.close()));
     },
