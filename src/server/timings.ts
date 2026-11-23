@@ -44,9 +44,11 @@ export async function logTiming(projectDir: string, entry: Record<string, unknow
   } catch { /* a log is not worth failing a compile or a download over */ }
 }
 
-/** The address a request came from: the tailnet IP that tailscale serve forwards, else the socket's. */
+/** The address a request came from: the tailnet IP that tailscale serve forwards (on loopback), else the socket's. */
 export function clientAddress(request: IncomingMessage): string {
-  const forwarded = request.headers['x-forwarded-for'];
+  const remote = request.socket.remoteAddress ?? '';
+  const loopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+  const forwarded = loopback ? request.headers['x-forwarded-for'] : undefined;
   const first = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(',')[0]?.trim();
   return first || request.socket.remoteAddress || '';
 }

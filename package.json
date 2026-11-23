@@ -14,7 +14,7 @@
     "serve": "node src/server/main.ts",
     "dev": "vite",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --test-concurrency=1 test/unit.test.ts test/security.test.ts test/mirror-safety.test.ts test/pdf-delta.test.ts && FUZZ_STEPS=12 node --test test/mirror-fuzz.test.ts",
+    "test": "node --test --test-concurrency=1 test/unit.test.ts test/security.test.ts test/mirror-safety.test.ts test/pdf-delta.test.ts test/tailnet-tls.test.ts && FUZZ_STEPS=12 node --test test/mirror-fuzz.test.ts",
     "test:fuzz": "FUZZ_STEPS=60 FUZZ_SEEDS=${FUZZ_SEEDS:-1,2,3,4,5} node --test --test-concurrency=1 test/mirror-fuzz.test.ts"
   },
   "dependencies": {

@@ -238,10 +238,20 @@ The server listens on port 5810, every interface. Each top-level folder of
 | --- | --- |
 | The local network (and the tailnet) | `npm run serve -- /path/to/projects` |
 | The tailnet only | `npm run serve -- /path/to/projects --host "$(tailscale ip -4)"` |
-| The tailnet only, HTTPS, tailnet identities | `npm run serve -- /path/to/projects --host 127.0.0.1 --access you@example.com`<br>plus `tailscale serve --bg --https=10000 http://127.0.0.1:5810` |
+| The tailnet only, HTTPS, tailnet identities (fast) | `npm run serve -- /path/to/projects --host 127.0.0.1 --access you@example.com --tls-host "$(tailscale ip -4)" --tls-port 10000 --tls-cert cert.pem --tls-key key.pem`<br>with `tailscale cert --cert-file cert.pem --key-file key.pem <machine>.<tailnet>.ts.net` |
+| The tailnet only, HTTPS, tailnet identities (simple) | `npm run serve -- /path/to/projects --host 127.0.0.1 --access you@example.com`<br>plus `tailscale serve --bg --https=10000 http://127.0.0.1:5810` |
 
-With `--access`, identity comes from the `Tailscale-User-Login` headers that
-`tailscale serve` adds, trusted only on loopback, and a project can be private,
+`tailscale serve` accepts connections in tailscaled's userspace TCP stack, which
+moves a tenth of what the tunnel carries, so large PDFs and downloads are slow
+behind it. With `--tls-*` the server terminates HTTPS itself on the tailnet
+address and asks tailscaled (`whois`) who each connection is. The certificate
+from `tailscale cert` lasts 90 days: renew it from a daily timer (the server
+picks up new files within the hour). Run the server as a user that can reach
+`/run/tailscale/tailscaled.sock`.
+
+With `--access`, identity comes from tailscaled's `whois` on the HTTPS
+listener, or from the `Tailscale-User-Login` headers that `tailscale serve`
+adds, trusted only on loopback. A project can be private,
 shared with named people, or view-only. Its permissions live in
 `.texwerk/access.json` (owner, public or private, and `edit`/`view` grants),
 outside the project's files, so they are never committed or mirrored.
@@ -319,10 +329,12 @@ TeXWerk trusts everyone who can reach it. Please keep that in mind:
 
 - Without `--access`, everyone who can reach the server can open, edit and
   delete every project. People type a name; nothing checks it.
-- With `--access`, identity comes from `tailscale serve`'s
-  `Tailscale-User-Login` header, which the server trusts only from loopback.
-  Bind `--host 127.0.0.1` and publish only through `tailscale serve`. A request
-  from a shell on the machine itself counts as the administrator.
+- With `--access`, identity comes from tailscaled's `whois` for each
+  connection to the `--tls-*` listener (a peer cannot forge it; headers there
+  are ignored, and devices tailscaled does not know or tagged devices are
+  refused), or from `tailscale serve`'s `Tailscale-User-Login` header, which
+  the server trusts only from loopback. Bind `--host 127.0.0.1`. A request from
+  a shell on the machine itself counts as the administrator.
 - Nothing in a project runs as code on the server. latexmk ignores
   `latexmkrc` files, TeX keeps its restricted shell escape, and git runs no
   hooks and checks out symbolic links as plain files. A pull or clone that
